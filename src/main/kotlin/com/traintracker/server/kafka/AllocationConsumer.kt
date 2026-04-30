@@ -3,14 +3,11 @@ package com.traintracker.server.kafka
 import com.traintracker.server.Config
 import com.traintracker.server.database.AppDatabase
 import kotlinx.coroutines.*
-import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.clients.consumer.KafkaConsumer
-import org.apache.kafka.common.serialization.StringDeserializer
 import org.slf4j.LoggerFactory
 import org.xml.sax.InputSource
 import java.io.StringReader
 import java.time.Duration
-import java.util.Properties
 import javax.xml.parsers.DocumentBuilderFactory
 
 private val log = LoggerFactory.getLogger("AllocationConsumer")
@@ -154,25 +151,12 @@ object AllocationConsumer {
         }
     }
 
-    private fun buildConsumer(): KafkaConsumer<String, String> {
-        val props = Properties().apply {
-            put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG,        Config.trustBootstrap)
-            put(ConsumerConfig.GROUP_ID_CONFIG,                 Config.allocationGroupId)
-            put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG,        "latest")
-            put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG,       "true")
-            put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG,   StringDeserializer::class.java.name)
-            put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer::class.java.name)
-            put(ConsumerConfig.REQUEST_TIMEOUT_MS_CONFIG,       "30000")
-            put(ConsumerConfig.SESSION_TIMEOUT_MS_CONFIG,       "45000")
-            put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG,         "200")
-            put("security.protocol", "SASL_SSL")
-            put("sasl.mechanism",    "PLAIN")
-            put("sasl.jaas.config",
-                "org.apache.kafka.common.security.plain.PlainLoginModule required " +
-                "username=\"${Config.allocationUsername}\" password=\"${Config.allocationPassword}\";")
-            put("metric.reporters",          "")
-            put("auto.include.jmx.reporter", "false")
-        }
-        return KafkaConsumer(props)
-    }
+    private fun buildConsumer(): KafkaConsumer<String, String> =
+        com.traintracker.server.kafka.buildConsumer(
+            username    = Config.allocationUsername,
+            password    = Config.allocationPassword,
+            groupId     = Config.allocationGroupId,
+            bootstrap   = Config.trustBootstrap,
+            offsetReset = "latest"
+        )
 }

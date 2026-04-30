@@ -6,6 +6,8 @@ import org.slf4j.LoggerFactory
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.ConcurrentHashMap
+import com.traintracker.server.database.AppDatabase
+import com.traintracker.server.cif.CorpusLookup
 
 private val log = LoggerFactory.getLogger("HspClient")
 
@@ -38,7 +40,8 @@ data class HspServiceMetrics(
     val matchedServices:      Int,
     val onTime:               Int,
     val total:                Int,
-    val punctualityPct:       Int
+    val punctualityPct:       Int,
+    val originCrs:            String = ""
 )
 
 @Serializable
@@ -67,6 +70,7 @@ data class HspDetailsResponse(
 // ─── Client ───────────────────────────────────────────────────────────────────
 
 object HspClient {
+    private val httpSemaphore = java.util.concurrent.Semaphore(2)
 
     private const val BASE_URL =
         "https://api1.raildata.org.uk/1010-historical-service-performance-_hsp_v1/api/v1"
@@ -80,13 +84,18 @@ object HspClient {
     // ── Cache — historic data never changes, so cache forever ─────────────────
     // Key: "from_loc|to_loc|from_date|to_date|from_time|to_time|days"
     private val metricsCache = ConcurrentHashMap<String, HspMetricsResponse>()
+    // detailsCache: keyed by RID, value is (response, fetchedAtMs)
+    // TTL: 23 hours — historic data is stable but we don't want stale entries
+    // persisting across day boundaries when dates roll over.
+    private val detailsCache = ConcurrentHashMap<String, Pair<HspDetailsResponse, Long>>()
     // Key: rid
-    private val detailsCache = ConcurrentHashMap<String, HspDetailsResponse>()
+    // In-flight request deduplication — prevents concurrent fetches for the same key
+    private val inFlight = ConcurrentHashMap<String, java.util.concurrent.CompletableFuture<HspMetricsResponse?>>()
 
     // ── /serviceMetrics ───────────────────────────────────────────────────────
 
     // Time chunks for splitting full-day queries — each window is light enough for the API
-    private val DAY_CHUNKS = listOf("0000" to "0559", "0600" to "1159", "1200" to "1759", "1800" to "2359")
+    private val DAY_CHUNKS = listOf("0000" to "0259", "0300" to "0559", "0600" to "0859", "0900" to "1159", "1200" to "1459", "1500" to "1759", "1800" to "2059", "2100" to "2359")
 
     fun getMetrics(req: HspMetricsRequest): HspMetricsResponse? {
         val key = apiKey ?: run {
@@ -104,24 +113,66 @@ object HspClient {
 
         // Check full-day cache first
         val cacheKey = "$fromLoc|$toLoc|${req.from_date}|${req.to_date}|${req.from_time}|${req.to_time}|${req.days}"
+        // Check persistent DB cache first (survives restarts)
+        AppDatabase.getHspCache(cacheKey)?.let { cached ->
+            log.info("HSP metrics DB cache hit: $cacheKey")
+            try {
+                val arr = org.json.JSONArray(cached)
+                val services = (0 until arr.length()).mapNotNull { i ->
+                    val s = arr.optJSONObject(i) ?: return@mapNotNull null
+                    parseServiceFromJson(s)
+                }
+                val parsed = HspMetricsResponse(services)
+                metricsCache[cacheKey] = parsed
+                return parsed
+            } catch (_: Exception) { }
+        }
         metricsCache[cacheKey]?.let {
             log.info("HSP metrics cache hit: $cacheKey")
             return it
         }
 
+        // Deduplicate concurrent requests for the same key
+        inFlight[cacheKey]?.let {
+            log.info("HSP waiting for in-flight request: $cacheKey")
+            return it.get()
+        }
         // If querying a full day, split into 6-hour chunks to avoid API timeouts
         if (req.from_time == "0000" && req.to_time == "2359") {
+            val future = java.util.concurrent.CompletableFuture<HspMetricsResponse?>()
+            inFlight[cacheKey] = future
+            try {
             log.info("HSP full-day query — splitting into ${DAY_CHUNKS.size} chunks: $fromLoc→$toLoc ${req.from_date}")
             val allServices = mutableListOf<HspServiceMetrics>()
+            var allChunksSucceeded = true
             for ((chunkFrom, chunkTo) in DAY_CHUNKS) {
                 val chunkReq = req.copy(from_time = chunkFrom, to_time = chunkTo)
+                Thread.sleep(8000) // rate limit gap between chunks
                 val chunkResult = getMetricsChunk(fromLoc, toLoc, chunkReq, key)
-                if (chunkResult != null) allServices.addAll(chunkResult.services)
+                if (chunkResult != null && chunkResult.services.isNotEmpty()) {
+                    allServices.addAll(chunkResult.services)
+                } else if (chunkResult == null) {
+                    // Network/API failure — mark incomplete
+                    allChunksSucceeded = false
+                }
+                // Note: empty but valid chunk (no services in that time window) is fine — not a failure
+                if (allServices.isNotEmpty()) Thread.sleep(1_000) // avoid rate limiting
             }
             val merged = HspMetricsResponse(allServices)
-            if (allServices.isNotEmpty()) metricsCache[cacheKey] = merged
+            log.info("HSP allChunksSucceeded=$allChunksSucceeded for $cacheKey (${allServices.size} services)")
+            if (allServices.isNotEmpty() && allChunksSucceeded) {
+                // Only cache in memory and DB if ALL chunks succeeded — never cache partial results
+                metricsCache[cacheKey] = merged
+                try { AppDatabase.setHspCache(cacheKey, servicesToJson(allServices)) } catch (_: Exception) {}
+            } else if (!allChunksSucceeded) {
+                log.info("HSP partial result for $cacheKey — not caching")
+            }
             log.info("HSP full-day merge: ${allServices.size} services for $fromLoc→$toLoc ${req.from_date}")
+            future.complete(merged)
             return merged
+            } finally {
+                inFlight.remove(cacheKey)
+            }
         }
 
         return getMetricsChunk(fromLoc, toLoc, req, key)?.also {
@@ -148,7 +199,8 @@ object HspClient {
 
         return try {
             val json = Json.parseToJsonElement(raw).jsonObject
-            val svcs = json["Services"]?.jsonArray ?: return HspMetricsResponse(emptyList())
+            val body = json["body"]?.jsonObject ?: json
+            val svcs = body["Services"]?.jsonArray ?: return HspMetricsResponse(emptyList())
 
             val services = mutableListOf<HspServiceMetrics>()
             for (svcEl in svcs) {
@@ -183,7 +235,8 @@ object HspClient {
                         matchedServices = matched,
                         onTime          = onTime,
                         total           = total,
-                        punctualityPct  = pct
+                        punctualityPct  = pct,
+                        originCrs       = attrs["origin_location"]?.jsonPrimitive?.content?.uppercase()?.trim()?.takeIf { it.isNotEmpty() } ?: CorpusLookup.crsFromTiploc(attrs["origin_location"]?.jsonPrimitive?.content ?: "") ?: ""
                     ))
                 }
             }
@@ -204,10 +257,15 @@ object HspClient {
     fun getDetails(rid: String): HspDetailsResponse? {
         val key = apiKey ?: return null
 
-        // Check cache first
-        detailsCache[rid]?.let {
-            log.info("HSP details cache hit: rid=$rid")
-            return it
+        detailsCache[rid]?.let { (cached, fetchedAt) ->
+            val ageMs = System.currentTimeMillis() - fetchedAt
+            if (ageMs < 23 * 3600 * 1000L) {
+                log.info("HSP details cache hit: rid=$rid age=${ageMs/1000}s")
+                return cached
+            } else {
+                detailsCache.remove(rid)
+                log.info("HSP details cache expired: rid=$rid age=${ageMs/1000}s")
+            }
         }
 
         val bodyJson = buildJsonObject { put("rid", rid) }.toString()
@@ -215,7 +273,8 @@ object HspClient {
 
         return try {
             val json   = Json.parseToJsonElement(raw).jsonObject
-            val detail = json["serviceAttributesDetails"]?.jsonObject ?: return null
+            val body   = json["body"]?.jsonObject ?: json
+            val detail = body["serviceAttributesDetails"]?.jsonObject ?: return null
             val locArr = detail["locations"]?.jsonArray ?: JsonArray(emptyList())
 
             val locations = locArr.mapNotNull { locEl ->
@@ -226,7 +285,14 @@ object HspClient {
                     scheduledArr = hhmm(l["gbtt_pta"]?.jsonPrimitive?.content),
                     actualDep    = hhmm(l["actual_td"]?.jsonPrimitive?.content),
                     actualArr    = hhmm(l["actual_ta"]?.jsonPrimitive?.content),
-                    cancelReason = l["late_canc_reason"]?.jsonPrimitive?.content ?: ""
+                    cancelReason = run {
+                        val dep = hhmm(l["actual_td"]?.jsonPrimitive?.content)
+                        val arr = hhmm(l["actual_ta"]?.jsonPrimitive?.content)
+                        val reason = l["late_canc_reason"]?.jsonPrimitive?.content ?: ""
+                        // Only treat as cancellation if no actual times exist.
+                        // late_canc_reason is also set for delayed-but-ran services.
+                        if (dep.isEmpty() && arr.isEmpty()) reason else ""
+                    }
                 )
             }
 
@@ -236,7 +302,7 @@ object HspClient {
                 tocCode   = detail["toc_code"]?.jsonPrimitive?.content ?: "",
                 locations = locations
             )
-            detailsCache[rid] = result   // Cache on success
+            detailsCache[rid] = Pair(result, System.currentTimeMillis())   // Cache with timestamp
             result
         } catch (e: Exception) {
             log.error("HSP details parse error for rid=$rid: ${e.message}", e)
@@ -247,26 +313,26 @@ object HspClient {
     // ── HTTP — with one retry on timeout or 5xx ───────────────────────────────
 
     private fun postWithRetry(url: String, bodyJson: String, apiKey: String): String? {
-        var lastError: String? = null
-        repeat(2) { attempt ->
+        val delays = listOf(3_000L, 10_000L, 30_000L)
+        for (attempt in 0 until 4) {
             if (attempt > 0) {
-                log.info("HSP retrying $url (attempt ${attempt + 1})")
-                Thread.sleep(2_000)
+                val delay = delays.getOrElse(attempt - 1) { 30_000L }
+                log.info("HSP retrying $url (attempt ${attempt + 1}, waiting ${delay/1000}s)")
+                Thread.sleep(delay)
             }
             val result = post(url, bodyJson, apiKey)
             if (result != null) return result
-            lastError = "attempt ${attempt + 1} failed"
         }
-        log.warn("HSP $url failed after 2 attempts: $lastError")
+        log.warn("HSP $url failed after 4 attempts")
         return null
     }
-
     private fun post(url: String, bodyJson: String, apiKey: String): String? {
+        httpSemaphore.acquire()
         return try {
             val conn = (URL(url).openConnection() as HttpURLConnection).apply {
                 requestMethod    = "POST"
                 connectTimeout   = 15_000
-                readTimeout      = 60_000
+                readTimeout      = 70_000
                 doOutput         = true
                 setRequestProperty("x-apikey", apiKey)
                 setRequestProperty("Content-Type", "application/json")
@@ -279,12 +345,48 @@ object HspClient {
             } else {
                 val err = try { conn.errorStream?.bufferedReader()?.readText() } catch (_: Exception) { "" }
                 log.warn("HSP POST $url → HTTP $code: $err")
-                null  // Triggers retry for 5xx
+                null
             }
         } catch (e: Exception) {
             log.error("HSP POST $url failed: ${e.message}")
-            null  // Triggers retry on timeout
+            null
+        } finally {
+            httpSemaphore.release()
         }
+    }
+
+    // ── JSON helpers for persistent cache ────────────────────────────────────
+    private fun parseServiceFromJson(s: org.json.JSONObject): HspServiceMetrics = HspServiceMetrics(
+        rid             = s.optString("rid"),
+        originTiploc    = s.optString("originTiploc"),
+        destTiploc      = s.optString("destTiploc"),
+        scheduledDep    = s.optString("scheduledDep"),
+        scheduledArr    = s.optString("scheduledArr"),
+        tocCode         = s.optString("tocCode"),
+        matchedServices = s.optInt("matchedServices"),
+        onTime          = s.optInt("onTime"),
+        total           = s.optInt("total"),
+        punctualityPct  = s.optInt("punctualityPct", -1)
+    )
+
+    private fun servicesToJson(services: List<HspServiceMetrics>): String {
+        val arr = org.json.JSONArray()
+        for (s in services) {
+            arr.put(org.json.JSONObject().apply {
+                put("rid",             s.rid)
+                put("originTiploc",    s.originTiploc)
+                put("destTiploc",      s.destTiploc)
+                put("scheduledDep",    s.scheduledDep)
+                put("scheduledArr",    s.scheduledArr)
+                put("tocCode",         s.tocCode)
+                put("matchedServices", s.matchedServices)
+                put("onTime",          s.onTime)
+                put("total",           s.total)
+                put("punctualityPct",  s.punctualityPct)
+                put("originCrs",        s.originCrs)
+            })
+        }
+        return arr.toString()
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

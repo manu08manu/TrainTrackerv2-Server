@@ -1,8 +1,11 @@
 package com.traintracker.server
 
 import com.traintracker.server.cif.CifDownloader
+import com.traintracker.server.kb.KbClient
+
 import com.traintracker.server.cif.CorpusLookup
 import com.traintracker.server.database.AppDatabase
+import com.traintracker.server.auth.AuthDatabase
 import com.traintracker.server.kafka.TrustConsumer
 import com.traintracker.server.kafka.VstpConsumer
 import com.traintracker.server.kafka.AllocationConsumer
@@ -20,9 +23,6 @@ import io.ktor.server.response.*
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.Json
 import org.slf4j.LoggerFactory
-import java.time.LocalTime
-import java.time.format.DateTimeFormatter
-import java.util.concurrent.Executors
 
 private val log = LoggerFactory.getLogger("Application")
 
@@ -72,6 +72,24 @@ private fun Application.configure() {
     }
 
     // ── Routes ────────────────────────────────────────────────────────────
+
+    // ── KB client initialisation ──────────────────────────────────────────
+    KbClient.nsiKey          = Config.kbNsiKey
+    KbClient.nsiSecret       = Config.kbNsiSecret
+    KbClient.nsiTokenUrl     = Config.kbNsiTokenUrl
+    KbClient.nsiUrl          = Config.kbNsiUrl
+    KbClient.incidentsKey    = Config.kbIncidentsKey
+    KbClient.incidentsSecret = Config.kbIncidentsSecret
+    KbClient.incidentsTokenUrl = Config.kbIncidentsTokenUrl
+    KbClient.incidentsUrl    = Config.kbIncidentsUrl
+    KbClient.stationsKey     = Config.kbStationsKey
+    KbClient.stationsSecret  = Config.kbStationsSecret
+    KbClient.stationsUrl     = Config.kbStationsUrl
+    KbClient.tocKey          = Config.kbTocKey
+    KbClient.tocSecret       = Config.kbTocSecret
+    KbClient.tocTokenUrl     = Config.kbTocTokenUrl
+    KbClient.tocUrl          = Config.kbTocUrl
+
     configureRoutes()
 
     // ── Background tasks ──────────────────────────────────────────────────
@@ -94,9 +112,28 @@ private suspend fun startupTasks(scope: CoroutineScope) {
     // 1. Initialise database (create tables if needed)
     withContext(Dispatchers.IO) {
         AppDatabase.init()
+        AuthDatabase.init()
     CorpusLookup.init()
     }
 
+    // 1b. Purge trust_movements daily at 02:00
+    scope.launch(Dispatchers.IO) {
+        while (true) {
+            val now = java.time.LocalTime.now(java.time.ZoneId.of("Europe/London"))
+            val nextPurge = java.time.LocalTime.of(2, 0)
+            val secondsUntil = if (now.isBefore(nextPurge))
+                now.until(nextPurge, java.time.temporal.ChronoUnit.SECONDS)
+            else
+                now.until(nextPurge, java.time.temporal.ChronoUnit.SECONDS) + 86400
+            delay(secondsUntil * 1000)
+            try {
+                AppDatabase.purgeStaleMovements()
+                log.info("Scheduled 02:00 purge of trust_movements complete")
+            } catch (e: Exception) {
+                log.warn("Scheduled purge of trust_movements failed: ${e.message}")
+            }
+        }
+    }
     // 2. Download/refresh CIF schedule (blocks until done on first run)
     try {
         CifDownloader.downloadIfNeeded()
@@ -104,6 +141,27 @@ private suspend fun startupTasks(scope: CoroutineScope) {
         log.error("CIF download failed on startup: ${e.message}")
         // Non-fatal — carry on with whatever is already in the DB
     }
+
+    // 2a. Reload trainId->uid activation map from DB
+    withContext(Dispatchers.IO) {
+        val activations = AppDatabase.loadTrainActivations()
+        if (activations.isNotEmpty()) {
+            com.traintracker.server.kafka.trainIdToRid.putAll(activations)
+            log.info("Reloaded ${activations.size} train activations from DB")
+        }
+    }
+
+    // 2b. Reload stanox->CRS map from DB (populated during CIF parse, lost on restart)
+    withContext(Dispatchers.IO) {
+        val stanoxMap = AppDatabase.loadStanoxMap()
+        if (stanoxMap.isNotEmpty()) {
+            com.traintracker.server.cif.CorpusLookup.mergeStanoxFromFeed(stanoxMap)
+            log.info("Stanox map reloaded from DB: ${stanoxMap.size} entries")
+        } else {
+            log.warn("Stanox map empty — delays may not show until next CIF download")
+        }
+    }
+
 
     // 3. Start Kafka consumers
     TrustConsumer.start(scope)
@@ -113,7 +171,7 @@ private suspend fun startupTasks(scope: CoroutineScope) {
 
     // 4. Nightly CIF refresh at 03:00
     scope.launch {
-        scheduleDailyAt(hour = 3, minute = 0) {
+        scheduleDailyAt(hour = 3, minute = 15) {
             try {
                 log.info("Nightly CIF refresh starting…")
                 CifDownloader.downloadIfNeeded()
@@ -123,12 +181,14 @@ private suspend fun startupTasks(scope: CoroutineScope) {
         }
     }
 
-    // 6. Nightly unit allocation snapshot at 00:01
+    // 5. Nightly unit allocation snapshot at 00:01
     scope.launch {
-        scheduleDailyAt(hour = 0, minute = 1) {
+        scheduleDailyAt(hour = 23, minute = 59) {
             try {
+                val today = java.time.LocalDate.now().toString()
                 val yesterday = java.time.LocalDate.now().minusDays(1).toString()
-                log.info("Snapshotting unit allocations for $yesterday…")
+                log.info("Snapshotting unit allocations for $today and $yesterday…")
+                AppDatabase.snapshotUnitAllocations(today)
                 AppDatabase.snapshotUnitAllocations(yesterday)
             } catch (e: Exception) {
                 log.error("Unit allocation snapshot failed: ${e.message}")
@@ -136,13 +196,14 @@ private suspend fun startupTasks(scope: CoroutineScope) {
         }
     }
 
-    // 5. Hourly TRUST movement pruner (removes events older than 24h) + allocation pruner
+    // 6. Hourly TRUST movement pruner (removes events older than 24h) + allocation pruner
     scope.launch {
         while (isActive) {
             delay(3_600_000L) // 1 hour
             try {
                 AppDatabase.pruneTrustMovements()
                 AppDatabase.pruneAllocations()
+                AppDatabase.pruneAllocationHistory()
                 log.debug("TRUST movements and allocations pruned")
             } catch (e: Exception) {
                 log.warn("Prune error: ${e.message}")

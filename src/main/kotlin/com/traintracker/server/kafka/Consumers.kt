@@ -21,7 +21,6 @@ import org.json.JSONObject
 import org.slf4j.LoggerFactory
 import java.time.Duration
 import java.util.Properties
-import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
 private val log = LoggerFactory.getLogger("KafkaConsumers")
@@ -33,12 +32,15 @@ private val log = LoggerFactory.getLogger("KafkaConsumers")
  * Thread-safe: updated by Kafka consumer coroutine, read by REST handler coroutines.
  */
 val trainLocations = ConcurrentHashMap<String, TrainLocation>()
+// trainId (10-char TRUST) -> RID mapping, populated from activation messages
+val trainIdToRid = ConcurrentHashMap<String, String>()
 
 // Buffer for batching TRUST movement DB writes
 private val movementBuffer = java.util.concurrent.CopyOnWriteArrayList<MovementBatch>()
 
 data class TrainLocation(
     val headcode: String,
+    val rid: String,
     val stationName: String,
     val crs: String?,
     val actualTime: String,
@@ -92,7 +94,7 @@ object TrustConsumer {
                 val header = msg.optJSONObject("header") ?: continue
                 val body   = msg.optJSONObject("body")   ?: continue
                 val msgType = header.optString("msg_type")
-                val trainId = body.optString("train_id", "")
+                val trainId = body.optString("train_id", "").take(10)
                 val headcode = headcodeFromTrainId(trainId)
 
                 when (msgType) {
@@ -126,6 +128,7 @@ object TrustConsumer {
         val scheduledTime = formatTrustTime(body.optString("planned_timestamp", "").ifEmpty { body.optString("gbtt_timestamp", "") })
         val actualTime    = formatTrustTime(body.optString("actual_timestamp", ""))
         val platform      = body.optString("platform", "").trim().ifEmpty { null }
+        val reasonCode    = body.optString("reason_code", "").trim().ifEmpty { null }
 
         val delayMins = if (scheduledTime.isNotEmpty() && actualTime.isNotEmpty())
             minuteDelay(scheduledTime, actualTime) else 0
@@ -134,8 +137,10 @@ object TrustConsumer {
         if (actualTime.isNotEmpty() && type == "DEPARTURE") {
             val stationName = stanoxToCrs(stanox) ?: stanox
             val crs = stanoxToCrs(stanox)
+            val rid = trainIdToRid[trainId] ?: ""
             trainLocations[headcode] = TrainLocation(
                 headcode     = headcode,
+                rid          = rid,
                 stationName  = stationName,
                 crs          = crs,
                 actualTime   = actualTime,
@@ -143,20 +148,31 @@ object TrustConsumer {
                 delayMinutes = delayMins
             )
             // Persist to DB
-            AppDatabase.upsertLocation(headcode, stationName, crs, actualTime, type, delayMins)
+            AppDatabase.upsertLocation(headcode, rid, stationName, crs, actualTime, type, delayMins)
         }
 
         // Buffer the movement for batch write
+        val uid = trainIdToRid[trainId] ?: ""
         movementBuffer.add(MovementBatch(
             headcode, trainId, stanox, stanoxToCrs(stanox),
             type, scheduledTime.ifEmpty { null }, actualTime.ifEmpty { null },
-            platform, isCancelled = false
+            platform, isCancelled = false, cancelReason = reasonCode, uid = uid
         ))
     }
 
     private fun handleActivation(header: JSONObject, body: JSONObject, trainId: String, headcode: String) {
+        log.debug("TRUST activation raw: trainId='$trainId' headcode='$headcode' uid='${body.optString("train_uid", "")}'")
         if (headcode.isEmpty()) return
-        log.debug("TRUST activation: $headcode ($trainId)")
+        val rawUid = body.optString("train_uid", "").trim()
+        // Only use train_uid if it looks like a valid CIF UID (letter + up to 5 alphanumeric chars)
+        val uid = if (rawUid.length in 2..6 && rawUid[0].isLetter()) rawUid else ""
+        if (uid.isNotEmpty()) {
+            trainIdToRid[trainId] = uid
+            AppDatabase.saveTrainActivation(trainId, uid)
+            log.debug("TRUST activation stored: $headcode ($trainId) uid=$uid")
+        } else {
+            log.debug("TRUST activation: $headcode ($trainId) no uid")
+        }
     }
 
     private fun handleCancellation(body: JSONObject, trainId: String, headcode: String) {
@@ -170,7 +186,8 @@ object TrustConsumer {
         movementBuffer.add(MovementBatch(
             headcode, trainId, stanox, stanoxToCrs(stanox),
             "CANCELLATION", scheduledTime.ifEmpty { null }, null, null,
-            isCancelled = true, cancelReason = reasonCode.ifEmpty { null }
+            isCancelled = true, cancelReason = reasonCode.ifEmpty { null },
+            uid = trainIdToRid[trainId] ?: ""
         ))
     }
 
@@ -180,20 +197,59 @@ object TrustConsumer {
         val stanox = body.optString("loc_stanox", "").ifBlank { return }
         val scheduledTime = formatTrustTime(body.optString("dep_timestamp", ""))
         val reasonCode = body.optString("reason_code", "")
-        // Record as a movement so the new origin appears in the board
+        val uid = trainIdToRid[trainId] ?: ""
+        val newOriginCrs = stanoxToCrs(stanox)
+        // Record the new origin departure
         movementBuffer.add(MovementBatch(
-            headcode, trainId, stanox, stanoxToCrs(stanox),
-            "DEPARTURE", scheduledTime.ifEmpty { null }, null, null, isCancelled = false
+            headcode, trainId, stanox, newOriginCrs,
+            "DEPARTURE", scheduledTime.ifEmpty { null }, null, null, isCancelled = false,
+            uid = uid
         ))
-        log.info("TRUST change of origin:  now starting from stanox= reason=")
+        // Mark all stops before the new origin as cancelled
+        if (uid.isNotEmpty() && newOriginCrs != null) {
+            try {
+                val cancelledStops = transaction {
+                    var newOriginTime = ""
+                    exec("SELECT scheduled_time FROM schedules WHERE uid='$uid' AND crs='$newOriginCrs' LIMIT 1") { rs ->
+                        if (rs.next()) newOriginTime = rs.getString("scheduled_time") ?: ""
+                    }
+                    val result = mutableListOf<Pair<String, String?>>()
+                    if (newOriginTime.isNotEmpty()) {
+                        exec(
+                            "SELECT tiploc, crs, scheduled_time FROM schedules WHERE uid='$uid' " +
+                            "AND scheduled_time < '$newOriginTime' AND is_pass=0"
+                        ) { rs ->
+                            while (rs.next()) {
+                                val crs = rs.getString("crs")?.takeIf { it.isNotEmpty() }
+                                    ?: com.traintracker.server.cif.CorpusLookup.crsFromTiploc(rs.getString("tiploc") ?: "")
+                                val scht = rs.getString("scheduled_time") ?: ""
+                                if (scht.isNotEmpty()) result.add(Pair(scht, crs))
+                            }
+                        }
+                    }
+                    result
+                }
+                for ((scht, crs) in cancelledStops) {
+                    movementBuffer.add(MovementBatch(
+                        headcode, trainId, stanox, crs,
+                        "CANCELLATION", scht, null, null,
+                        isCancelled = true, cancelReason = reasonCode.ifEmpty { null },
+                        uid = uid
+                    ))
+                }
+                if (cancelledStops.isNotEmpty())
+                    log.info("TRUST COO: $headcode cancelled ${cancelledStops.size} stops before $newOriginCrs")
+            } catch (e: Exception) {
+                log.warn("COO cancellation lookup failed for $headcode: ${e.message}")
+            }
+        }
     }
-
     private fun handleChangeOfIdentity(body: JSONObject, oldHeadcode: String) {
         if (oldHeadcode.isEmpty()) return
         val revisedTrainId = body.optString("revised_train_id", "").ifBlank { return }
         val newHeadcode = headcodeFromTrainId(revisedTrainId)
         if (newHeadcode.isEmpty() || newHeadcode == oldHeadcode) return
-        log.info("TRUST change of identity:  -> ")
+        log.info("TRUST change of identity: $oldHeadcode -> $newHeadcode")
         // Update in-memory location map so tracking follows the new headcode
         AppDatabase.saveHeadcodeAlias(oldHeadcode, newHeadcode)
         AppDatabase.transferLocation(oldHeadcode, newHeadcode)
@@ -223,8 +279,17 @@ object VstpConsumer {
                               Config.vstpBootstrap).use { consumer ->
                     consumer.subscribe(listOf("VSTP_ALL"))
                     log.info("VSTP subscribed to VSTP_ALL (group=$groupId)")
+                    // Poll once to trigger partition assignment, then seek to beginning
+                    // so we replay all historical VSTP messages (engineering amendments etc.)
+                    var seeked = false
                     while (isActive) {
                         val records = consumer.poll(Duration.ofSeconds(5))
+                        if (!seeked && consumer.assignment().isNotEmpty()) {
+                            consumer.seekToBeginning(consumer.assignment())
+                            log.info("VSTP seeked to beginning on ${consumer.assignment().size} partitions")
+                            seeked = true
+                            continue
+                        }
                         for (record in records) {
                             record.value()?.let { handleVstpMessage(it) }
                         }
@@ -258,7 +323,7 @@ object VstpConsumer {
                 else     -> log.debug("VSTP unknown txType=$txType uid=$uid")
             }
         } catch (e: Exception) {
-            log.debug("VSTP parse error: ${e.message}")
+            log.warn("VSTP parse error: ${e.message} — json=${json.take(200)}")
         }
     }
 
@@ -275,7 +340,7 @@ object VstpConsumer {
     }
 
     private fun applyVstpCreate(uid: String, stp: Char, sched: JSONObject) {
-        val stops: List<CifStop> = CifParser.parseScheduleForVstp(sched)
+        val stops: List<CifStop> = CifParser.parseScheduleForVstpKafka(sched)
         if (stops.isEmpty()) {
             log.debug("VSTP Create: uid=$uid stp=$stp → not running today or no stops")
             return
@@ -308,16 +373,17 @@ object VstpConsumer {
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────
 
-private fun buildConsumer(
+fun buildConsumer(
     username: String,
     password: String,
     groupId: String,
-    bootstrap: String = Config.trustBootstrap
+    bootstrap: String = Config.trustBootstrap,
+    offsetReset: String = "latest"
 ): KafkaConsumer<String, String> {
     val props = Properties().apply {
         put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG,        bootstrap)
         put(ConsumerConfig.GROUP_ID_CONFIG,                 groupId)
-        put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG,        "latest")
+        put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG,        offsetReset)
         put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG,       "true")
         put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG,   StringDeserializer::class.java.name)
         put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer::class.java.name)
@@ -346,12 +412,9 @@ fun headcodeFromTrainId(trainId: String): String {
 fun formatTrustTime(epochMs: String): String {
     val ms = epochMs.toLongOrNull() ?: return ""
     if (ms == 0L) return ""
-    val cal = java.util.Calendar.getInstance()
-    cal.timeInMillis = ms
-    return "%02d:%02d".format(
-        cal.get(java.util.Calendar.HOUR_OF_DAY),
-        cal.get(java.util.Calendar.MINUTE)
-    )
+    val zdt = java.time.Instant.ofEpochMilli(ms)
+        .atZone(java.time.ZoneId.of("UTC"))
+    return "%02d:%02d".format(zdt.hour, zdt.minute)
 }
 
 fun minuteDelay(scheduled: String, actual: String): Int {

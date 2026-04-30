@@ -56,6 +56,7 @@ dependencies {
     implementation("io.ktor:ktor-client-auth:$ktorVersion")
 
     implementation("org.json:json:20240303")
+    implementation("org.mindrot:jbcrypt:0.4")
 
     // ── Serialization + logging ────────────────────────────────────────────
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")

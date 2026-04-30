@@ -2,6 +2,7 @@ package com.traintracker.server.cif
 
 import com.traintracker.server.Config
 import com.traintracker.server.database.AppDatabase
+import com.traintracker.server.database.AssociationRecord
 import com.traintracker.server.database.Schedules
 import io.ktor.client.*
 import io.ktor.client.engine.cio.*
@@ -30,6 +31,7 @@ private val log = LoggerFactory.getLogger("CifParser")
 object CorpusLookup {
     private val tiplocToCrs = HashMap<String, String>(10000)
     private val stanoxToCrs = HashMap<String, String>(10000)
+    private val tiplocToName = HashMap<String, String>(12000)
 
     /**
      * Platform-level TIPLOCs that the CIF feed doesn't map to a CRS.
@@ -69,7 +71,10 @@ object CorpusLookup {
         // Reading
         "RDNGSTN" to "RDG", "RDNGKBJ" to "RDG",
         // London Bridge
-        "LONDBDG" to "LBG", "LONDBDE" to "LBG",
+        "LNDNBDG" to "LBG", "LNDNBDGE" to "LBG", "LNDNBDC" to "LBG", "LNDNBDE" to "LBG",
+        "LNDNB9"  to "LBG", "LNDNB10" to "LBG", "LNDNB11" to "LBG", "LNDNB12" to "LBG",
+        "LNDNB13" to "LBG", "LNDNB14" to "LBG", "LNDNB15" to "LBG", "LNDNB16" to "LBG",
+        "LNDNASJ" to "LBG", "LNDNBCJ" to "LBG",  // Abbey Street Jct, Brunswick Court Jct
         // London Charing Cross
         "CHARCRS" to "CHX", "CHARCRJ" to "CHX",
         // London Cannon Street
@@ -116,6 +121,10 @@ object CorpusLookup {
         // (VICTRIA, VICTRMX, VICTRML, VICTRVS already above)
         "VICTRIC" to "VIC",                                    // Victoria Central Platforms
         "VICTRIE" to "VIC",                                    // Victoria Eastern Platforms (shows as "Victoria E")
+        "FAVRSHM" to "FAV",                                    // Faversham
+        "FAVRUPS" to "FAV UPS",                              // Faversham Up Sidings
+        "DOVERP"  to "DVP",                                    // Dover Priory
+        "RAMSGTE" to "RAM", "RAMSGTD" to "RAM",               // Ramsgate
         "VICTRCR" to "VIC", "VICTCRB" to "VIC", "VICTCRS" to "VIC",  // Carriage Roads
         "VICT9"  to "VIC", "VICT10" to "VIC", "VICT11" to "VIC",
         "VICT12" to "VIC", "VICT13" to "VIC", "VICT14" to "VIC",
@@ -158,13 +167,26 @@ object CorpusLookup {
         "WPH" to "WOP",
     )
 
-    private fun normaliseCrs(crs: String?): String? =
-        if (crs.isNullOrEmpty()) null else CRS_ALIASES[crs] ?: crs
+    private fun normaliseCrs(crs: String?): String? {
+        if (crs.isNullOrEmpty()) return null
+        val resolved = CRS_ALIASES[crs] ?: crs
+        return if (resolved.length <= 3) resolved else null
+    }
 
     /** Called once at startup — loads manual mappings into the lookup. */
     fun init() {
         tiplocToCrs.putAll(manualMappings)
         log.info("CorpusLookup: loaded ${tiplocToCrs.size} manual mappings")
+        val namesFile = java.io.File("/opt/traintracker/tiploc_names.json")
+        if (namesFile.exists()) {
+            try {
+                val json = org.json.JSONObject(namesFile.readText())
+                for (key in json.keys()) tiplocToName[key] = json.getString(key)
+                log.info("CorpusLookup: loaded ${tiplocToName.size} TIPLOC names")
+            } catch (e: Exception) {
+                log.warn("CorpusLookup: failed to load tiploc_names.json: ${e.message}")
+            }
+        }
     }
 
     /**
@@ -191,7 +213,22 @@ object CorpusLookup {
 
 
     fun crsFromTiploc(tiploc: String): String? = normaliseCrs(tiplocToCrs[tiploc])
+
     fun crsFromStanox(stanox: String): String? = normaliseCrs(stanoxToCrs[stanox])
+    fun nameFromTiploc(tiploc: String): String? = tiplocToName[tiploc]
+    fun tiplocNameCount(): Int = tiplocToName.size
+    fun updateTiplocName(tiploc: String, name: String) {
+        tiplocToName[tiploc] = name
+        // Persist to file
+        try {
+            val namesFile = java.io.File("/opt/traintracker/tiploc_names.json")
+            val json = org.json.JSONObject()
+            for ((k, v) in tiplocToName) json.put(k, v)
+            namesFile.writeText(json.toString())
+        } catch (e: Exception) {
+            log.warn("CorpusLookup: failed to persist tiploc name update: \${e.message}")
+        }
+    }
 }
 
 // ─── Data model ───────────────────────────────────────────────────────────────
@@ -316,6 +353,8 @@ object CifParser {
         val tiplocData = collectTiplocs(gzipBytes)
         CorpusLookup.mergeFromFeed(tiplocData.tiplocToCrs)
         CorpusLookup.mergeStanoxFromFeed(tiplocData.stanoxToCrs)
+        // Persist stanox map so it can be reloaded on restart without re-downloading
+        AppDatabase.saveStanoxMap(tiplocData.stanoxToCrs)
 
         // ── Pass 2: parse schedules with fully populated lookup ──────────
         val today    = LocalDate.now()
@@ -375,6 +414,43 @@ object CifParser {
 
         flush() // flush remaining
         log.info("CIF JSON: $scheduleCount schedules, $validCount run today → $total stops")
+
+        // -- Pass 3: parse JsonAssociationV1 records
+        val associations = mutableListOf<AssociationRecord>()
+        val assocStream = GZIPInputStream(gzipBytes.inputStream())
+        BufferedReader(InputStreamReader(assocStream, Charsets.UTF_8)).use { reader ->
+            var aline = reader.readLine()
+            while (aline != null) {
+                val trimmed = aline.trim()
+                if (trimmed.startsWith("{\"JsonAssociationV1\"")) {
+                    try {
+                        val assoc = JSONObject(trimmed).optJSONObject("JsonAssociationV1")
+                        if (assoc != null) {
+                            val mainUid     = assoc.optString("main_train_uid", "").trim()
+                            val assocUid    = assoc.optString("assoc_train_uid", "").trim()
+                            val assocTiploc = assoc.optString("location", "").trim()
+                            val assocType   = assoc.optString("category", "").trim()
+                            val stpInd      = assoc.optString("CIF_stp_indicator", "").firstOrNull()
+                            val validFrom   = parseDate(assoc.optString("assoc_start_date", ""))
+                            val validTo     = parseDate(assoc.optString("assoc_end_date", ""))
+                            val daysRun     = assoc.optString("assoc_days", "")
+                            val okStp   = stpInd != null && stpInd != 'C'
+                            val okDates = validFrom != null && validTo != null &&
+                                          !today.isBefore(validFrom) && !today.isAfter(validTo)
+                            val okDow   = daysRun.length < 7 || daysRun[todayDow.value - 1] == '1'
+                            if (okStp && okDates && okDow &&
+                                mainUid.isNotEmpty() && assocUid.isNotEmpty() && assocTiploc.isNotEmpty()) {
+                                associations.add(AssociationRecord(mainUid, assocUid, assocTiploc, assocType, stpInd!!))
+                            }
+                        }
+                    } catch (_: Exception) {}
+                }
+                aline = reader.readLine()
+            }
+        }
+        AppDatabase.replaceAssociations(associations)
+        log.info("CIF associations: ${associations.size} parsed and stored")
+
         return total
     }
 
@@ -384,51 +460,122 @@ object CifParser {
      * and returns the CifStop rows to insert — or an empty list if the service
      * isn't running today (wrong date range, wrong day-of-week, or no stops).
      */
+    /**
+     * Parse a VSTP schedule from the Kafka feed (VSTPCIFMsgV1 format).
+     * This format differs from the CIF JSON format:
+     *  - tiploc is at location.tiploc.tiploc_id (not tiploc_code)
+     *  - times use scheduled_departure_time / public_departure_time (not departure / public_departure)
+     *  - location type is inferred from CIF_activity (TB=origin, TF=dest)
+     *  - schedule metadata fields use CIF_ prefix
+     */
+    fun parseScheduleForVstpKafka(sched: JSONObject): List<CifStop> {
+        val today    = LocalDate.now()
+        val todayDow = today.dayOfWeek
+        val stpIndicator = sched.optString("CIF_stp_indicator", "").firstOrNull() ?: return emptyList()
+        if (stpIndicator == 'C') return emptyList()
+        if (sched.optString("transaction_type", "") == "Delete") return emptyList()
+        val validFromStr = sched.optString("schedule_start_date", "")
+        val validToStr   = sched.optString("schedule_end_date", "")
+        val validFrom    = parseDate(validFromStr) ?: return emptyList()
+        val validTo      = parseDate(validToStr)   ?: return emptyList()
+        if (today.isBefore(validFrom) || today.isAfter(validTo)) return emptyList()
+        val daysRun = sched.optString("schedule_days_runs", "")
+        if (daysRun.length < 7 || daysRun[todayDow.value - 1] != '1') return emptyList()
+        val uid      = sched.optString("CIF_train_uid", "").trim()
+        if (uid.isEmpty()) return emptyList()
+        val atocCode = sched.optString("atoc_code", "").trim()
+        val segArray = sched.optJSONArray("schedule_segment")
+        val seg = if (segArray != null && segArray.length() > 0)
+            segArray.optJSONObject(0)
+        else
+            sched.optJSONObject("schedule_segment")
+        ?: return emptyList()
+        val headcode = seg.optString("signalling_id", "").trim()
+        if (headcode.isEmpty()) return emptyList()
+        val locs = seg.optJSONArray("schedule_location") ?: return emptyList()
+        if (locs.length() == 0) return emptyList()
+        // Determine origin/dest tiplocs from CIF_activity
+        var originTiploc = ""
+        var destTiploc   = ""
+        for (i in 0 until locs.length()) {
+            val loc      = locs.optJSONObject(i) ?: continue
+            val activity = loc.optString("CIF_activity", "").trim()
+            val tiploc   = loc.optJSONObject("location")
+                ?.optJSONObject("tiploc")
+                ?.optString("tiploc_id", "")?.trim() ?: ""
+            when (activity) {
+                "TB" -> originTiploc = tiploc
+                "TF" -> destTiploc   = tiploc
+            }
+        }
+        val originCrs = CorpusLookup.crsFromTiploc(originTiploc)
+        val destCrs   = CorpusLookup.crsFromTiploc(destTiploc)
+        val stops = mutableListOf<CifStop>()
+        for (i in 0 until locs.length()) {
+            val loc      = locs.optJSONObject(i) ?: continue
+            val activity = loc.optString("CIF_activity", "").trim()
+            val tiploc   = loc.optJSONObject("location")
+                ?.optJSONObject("tiploc")
+                ?.optString("tiploc_id", "")?.trim() ?: ""
+            if (tiploc.isEmpty()) continue
+            val locType = when (activity) {
+                "TB" -> "LO"
+                "TF" -> "LT"
+                else -> "LI"
+            }
+            val pubDep  = loc.optString("public_departure_time", "").trim().replace(" ", "")
+            val pubArr  = loc.optString("public_arrival_time", "").trim().replace(" ", "")
+            val wttDep  = loc.optString("scheduled_departure_time", "").trim().replace(" ", "")
+            val wttArr  = loc.optString("scheduled_arrival_time", "").trim().replace(" ", "")
+            val pass    = loc.optString("scheduled_pass_time", "").trim().replace(" ", "")
+            val crs     = CorpusLookup.crsFromTiploc(tiploc)
+            val isPass  = locType == "LI" && pubDep.isEmpty() && pubArr.isEmpty() && pass.isNotEmpty()
+            val schedTime = when {
+                locType == "LO" -> formatHHMM(pubDep.ifEmpty { wttDep })
+                locType == "LT" -> formatHHMM(pubArr.ifEmpty { wttArr })
+                pubDep.isNotEmpty() -> formatHHMM(pubDep)
+                pubArr.isNotEmpty() -> formatHHMM(pubArr)
+                pass.isNotEmpty()   -> formatHHMM(pass)
+                wttDep.isNotEmpty() -> formatHHMM(wttDep)
+                wttArr.isNotEmpty() -> formatHHMM(wttArr)
+                else -> ""
+            }
+            if (schedTime.isEmpty() && locType != "LT") continue
+            stops += CifStop(
+                uid           = uid,
+                headcode      = headcode,
+                atocCode      = atocCode,
+                stpIndicator  = stpIndicator,
+                tiploc        = tiploc,
+                crs           = crs,
+                scheduledTime = schedTime,
+                platform      = "",
+                isPass        = isPass,
+                stopType      = locType,
+                originTiploc  = originTiploc,
+                destTiploc    = destTiploc,
+                originCrs     = originCrs,
+                destCrs       = destCrs
+            )
+        }
+        return stops
+    }
+
+    /**
+     * Parse a VSTP schedule from the Kafka feed (VSTPCIFMsgV1 format).
+     * This format differs from the CIF JSON format:
+     *  - tiploc is at location.tiploc.tiploc_id (not tiploc_code)
+     *  - times use scheduled_departure_time / public_departure_time (not departure / public_departure)
+     *  - location type is inferred from CIF_activity (TB=origin, TF=dest)
+     *  - schedule metadata fields use CIF_ prefix
+     */
+
     fun parseScheduleForVstp(sched: JSONObject): List<CifStop> {
         val today    = LocalDate.now()
         val todayDow = today.dayOfWeek
         return parseSchedule(sched, today, todayDow)
     }
 
-    fun parse(gzipBytes: ByteArray): List<CifStop> {
-        // ── Pass 1: collect TIPLOCs ──────────────────────────────────────
-        val tiplocData = collectTiplocs(gzipBytes)
-        CorpusLookup.mergeFromFeed(tiplocData.tiplocToCrs)
-        CorpusLookup.mergeStanoxFromFeed(tiplocData.stanoxToCrs)
-
-        // ── Pass 2: parse schedules ──────────────────────────────────────
-        val today    = LocalDate.now()
-        val todayDow = today.dayOfWeek
-        val stops    = mutableListOf<CifStop>()
-        var scheduleCount = 0
-        var validCount    = 0
-
-        GZIPInputStream(gzipBytes.inputStream()).use { gis ->
-            BufferedReader(InputStreamReader(gis, Charsets.UTF_8)).use { reader ->
-                var line = reader.readLine()
-                while (line != null) {
-                    val trimmed = line.trim()
-                    if (trimmed.startsWith("{\"JsonScheduleV1\"")) {
-                        scheduleCount++
-                        try {
-                            val sched = JSONObject(trimmed).optJSONObject("JsonScheduleV1")
-                            if (sched != null) {
-                                val parsed = parseSchedule(sched, today, todayDow)
-                                if (parsed.isNotEmpty()) {
-                                    stops.addAll(parsed)
-                                    validCount++
-                                }
-                            }
-                        } catch (_: Exception) {}
-                    }
-                    line = reader.readLine()
-                }
-            }
-        }
-
-        log.info("CIF JSON: $scheduleCount schedules, $validCount run today → ${stops.size} stops")
-        return stops
-    }
 
     private fun parseSchedule(
         sched: JSONObject,
@@ -525,7 +672,7 @@ object CifParser {
     private fun parseDate(raw: String): LocalDate? = try {
         when {
             raw.isEmpty()     -> null
-            raw.contains('-') -> LocalDate.parse(raw, DateTimeFormatter.ISO_LOCAL_DATE)
+            raw.contains('-') -> LocalDate.parse(raw.substringBefore('T'), DateTimeFormatter.ISO_LOCAL_DATE)
             raw.contains('/') -> LocalDate.parse(raw, DateTimeFormatter.ofPattern("dd/MM/yyyy"))
             raw.length == 6   -> LocalDate.parse(raw, DateTimeFormatter.ofPattern("yyMMdd"))
             else              -> null
