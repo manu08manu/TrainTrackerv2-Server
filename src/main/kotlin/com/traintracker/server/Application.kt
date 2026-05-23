@@ -74,14 +74,8 @@ private fun Application.configure() {
     // ── Routes ────────────────────────────────────────────────────────────
 
     // ── KB client initialisation ──────────────────────────────────────────
-    KbClient.nsiKey          = Config.kbNsiKey
-    KbClient.nsiSecret       = Config.kbNsiSecret
-    KbClient.nsiTokenUrl     = Config.kbNsiTokenUrl
-    KbClient.nsiUrl          = Config.kbNsiUrl
-    KbClient.incidentsKey    = Config.kbIncidentsKey
-    KbClient.incidentsSecret = Config.kbIncidentsSecret
-    KbClient.incidentsTokenUrl = Config.kbIncidentsTokenUrl
-    KbClient.incidentsUrl    = Config.kbIncidentsUrl
+    KbClient.disruptionsKey  = Config.kbDisruptionsKey
+    KbClient.disruptionsUrl  = Config.kbDisruptionsUrl
     KbClient.stationsKey     = Config.kbStationsKey
     KbClient.stationsSecret  = Config.kbStationsSecret
     KbClient.stationsUrl     = Config.kbStationsUrl

@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TrainTracker · Control</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0a0e1a; --surface: #111827; --surface2: #1a2235;
+  --border: #1e2d45; --accent: #3b82f6; --accent2: #06b6d4;
+  --green: #10b981; --red: #ef4444; --amber: #f59e0b;
+  --text: #e2e8f0; --text-dim: #64748b; --text-mid: #94a3b8;
+  --mono: 'Space Mono', monospace; --sans: 'DM Sans', sans-serif;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--text); font-family: var(--sans); min-height: 100vh; }
+
+header {
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  padding: 14px 28px; display: flex; align-items: center; justify-content: space-between;
+}
+header .logo { font-family: var(--mono); font-size: .9rem; color: var(--accent2); letter-spacing: .05em; }
+header .header-right { display: flex; align-items: center; gap: 12px; }
+header .user-email { color: var(--text-dim); font-size: .8rem; display: none; }
+
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--accent); color: #fff; border: none; border-radius: 6px;
+  padding: 8px 16px; font-size: .8rem; font-family: var(--sans); font-weight: 500;
+  cursor: pointer; transition: opacity .15s;
+}
+.btn:hover { opacity: .85; }
+.btn.sm { padding: 6px 12px; font-size: .78rem; }
+.btn.danger { background: var(--red); }
+.btn.green { background: var(--green); }
+.btn.ghost { background: transparent; border: 1px solid var(--border); color: var(--text-mid); }
+.btn.ghost:hover { border-color: var(--accent); color: var(--text); }
+
+/* ── Status grid ────────────────────────────── */
+.content { max-width: 960px; margin: 0 auto; padding: 32px 24px; }
+.section-label {
+  font-family: var(--mono); font-size: .7rem; color: var(--text-dim);
+  text-transform: uppercase; letter-spacing: .1em; margin-bottom: 14px;
+}
+.status-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px;
+  margin-bottom: 32px;
+}
+.stat-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 10px; padding: 18px 20px;
+}
+.stat-card .label { font-size: .75rem; color: var(--text-dim); margin-bottom: 10px; text-transform: uppercase; letter-spacing: .05em; }
+.stat-card .value { font-family: var(--mono); font-size: 1.3rem; color: var(--text); }
+.stat-card .value.green { color: var(--green); }
+.stat-card .value.red { color: var(--red); }
+.stat-card .value.amber { color: var(--amber); }
+.stat-card .sub { font-size: .72rem; color: var(--text-dim); margin-top: 6px; }
+.pulse { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--green); margin-right: 6px; animation: pulse 2s infinite; }
+.pulse.dead { background: var(--red); animation: none; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+/* ── Modal overlay ──────────────────────────── */
+.overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,.7);
+  display: none; align-items: center; justify-content: center; z-index: 100;
+  backdrop-filter: blur(4px);
+}
+.overlay.active { display: flex; }
+.modal {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 32px; width: 100%; max-width: 480px;
+  max-height: 90vh; overflow-y: auto; position: relative;
+}
+.modal h2 { font-family: var(--mono); font-size: .9rem; color: var(--accent2);
+  margin-bottom: 4px; letter-spacing: .06em; text-transform: uppercase; }
+.modal .sub { color: var(--text-dim); font-size: .82rem; margin-bottom: 24px; }
+.modal-close {
+  position: absolute; top: 16px; right: 16px; background: none; border: none;
+  color: var(--text-dim); font-size: 1.2rem; cursor: pointer; line-height: 1;
+}
+.modal-close:hover { color: var(--text); }
+
+/* ── Form fields ────────────────────────────── */
+.field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+.field label { font-size: .75rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: .05em; }
+.field input {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text); padding: 9px 12px; font-size: .88rem; font-family: var(--mono); outline: none;
+}
+.field input:focus { border-color: var(--accent); }
+.field-row { display: flex; gap: 10px; align-items: flex-end; }
+.field-row .field { flex: 1; margin-bottom: 0; }
+.msg { font-size: .8rem; margin-top: 10px; min-height: 18px; }
+.msg.ok { color: var(--green); }
+.msg.err { color: var(--red); }
+
+/* ── Admin panel sections ───────────────────── */
+.divider { height: 1px; background: var(--border); margin: 22px 0; }
+.users-table { width: 100%; border-collapse: collapse; }
+.users-table th { font-size: .7rem; color: var(--text-dim); text-align: left;
+  padding: 0 0 10px; text-transform: uppercase; letter-spacing: .06em;
+  border-bottom: 1px solid var(--border); font-weight: 400; }
+.users-table td { padding: 10px 0; border-bottom: 1px solid var(--border); font-size: .85rem; }
+.users-table tr:last-child td { border-bottom: none; }
+.users-table td:last-child { text-align: right; }
+
+.refresh-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 24px; }
+.refresh-bar span { font-size: .75rem; color: var(--text-dim); }
+</style>
+</head>
+<body>
+
+<header>
+  <span class="logo">TrainTracker · Control</span>
+  <div class="header-right">
+    <span class="user-email" id="user-email"></span>
+    <button class="btn ghost sm" id="admin-btn" onclick="openAdmin()">Admin</button>
+    <button class="btn sm danger" id="logout-btn" style="display:none" onclick="logout()">Sign out</button>
+  </div>
+</header>
+
+<!-- ══ Public status view ═══════════════════════════════════════════════ -->
+<div class="content">
+  <div class="refresh-bar">
+    <span class="section-label">System Status</span>
+    <span id="last-updated" style="margin-left:auto"></span>
+    <button class="btn ghost sm" onclick="loadStatus()">↻ Refresh</button>
+  </div>
+
+  <div class="status-grid" id="status-grid">
+    <div class="stat-card"><div class="label">Loading…</div></div>
+  </div>
+</div>
+
+<!-- ══ Login modal ══════════════════════════════════════════════════════ -->
+<div class="overlay" id="login-overlay">
+  <div class="modal">
+    <button class="modal-close" onclick="closeOverlay('login-overlay')">✕</button>
+    <h2>Admin Login</h2>
+    <p class="sub">Sign in to edit TIPLOC names and manage users</p>
+    <div class="field">
+      <label>Email</label>
+      <input type="email" id="login-email" placeholder="admin@example.com" autocomplete="username">
+    </div>
+    <div class="field">
+      <label>Password</label>
+      <input type="password" id="login-password" placeholder="••••••••" autocomplete="current-password"
+        onkeydown="if(event.key==='Enter') login()">
+    </div>
+    <p class="msg err" id="login-error"></p>
+    <button class="btn" style="width:100%;justify-content:center;margin-top:8px" onclick="login()">Sign in</button>
+  </div>
+</div>
+
+<!-- ══ Admin panel modal ════════════════════════════════════════════════ -->
+<div class="overlay" id="admin-overlay">
+  <div class="modal" style="max-width:600px">
+    <button class="modal-close" onclick="closeOverlay('admin-overlay')">✕</button>
+    <h2>TIPLOC Editor</h2>
+    <p class="sub">Override a station name for a given TIPLOC code</p>
+    <div class="field" style="margin-bottom:10px">
+      <label>TIPLOC</label>
+      <input type="text" id="tiploc-code" placeholder="e.g. WDON" maxlength="8" style="text-transform:uppercase">
+    </div>
+    <div class="field" style="margin-bottom:10px">
+      <label>Station name</label>
+      <input type="text" id="tiploc-name" placeholder="e.g. Wimbledon"
+        onkeydown="if(event.key==='Enter') setTiploc()">
+    </div>
+    <button class="btn green sm" onclick="setTiploc()">Update name</button>
+    <p class="msg" id="tiploc-msg"></p>
+    <div class="divider"></div>
+    <h2 style="margin-bottom:4px">Recent Changes</h2>
+    <p class="sub">Last 100 TIPLOC edits</p>
+    <table class="users-table">
+      <thead><tr><th>TIPLOC</th><th>New name</th><th>By</th><th>When</th></tr></thead>
+      <tbody id="audit-body"><tr><td colspan="4" style="color:var(--text-dim);font-size:.8rem;padding:10px 0">Loading…</td></tr></tbody>
+    </table>
+    <div class="divider"></div>
+    <h2 style="margin-bottom:4px">Users</h2>
+    <p class="sub">Add or remove admin accounts</p>
+    <table class="users-table">
+      <thead><tr><th>Email</th><th></th></tr></thead>
+      <tbody id="users-body"><tr><td colspan="2" style="color:var(--text-dim);font-size:.8rem;padding:12px 0">Loading…</td></tr></tbody>
+    </table>
+    <div class="divider"></div>
+    <p class="section-label" style="margin-bottom:14px">Add / reset user</p>
+    <div class="field">
+      <label>Email</label>
+      <input type="email" id="new-email" placeholder="user@example.com">
+    </div>
+    <div class="field">
+      <label>Password (8+ chars)</label>
+      <input type="password" id="new-password" placeholder="········"
+        onkeydown="if(event.key==='Enter') addUser()">
+    </div>
+    <button class="btn sm" onclick="addUser()">Set user</button>
+    <p class="msg" id="users-msg"></p>
+  </div>
+</div>
+  </div>
+</div>
+
+<script>
+let token = localStorage.getItem('tt_token');
+
+// ── Status ──────────────────────────────────────────────────────────────
+async function loadStatus() {
+  try {
+    const r = await fetch('/api/status');
+    const d = await r.json();
+    const grid = document.getElementById('status-grid');
+    const connected = d.trustConnected;
+    grid.innerHTML = `
+      ${stat('TRUST Feed', `<span class="pulse${connected?'':' dead'}"></span>${connected ? 'Connected' : 'Disconnected'}`, connected ? 'green' : 'red')}
+      ${stat('CIF Date', d.cifLastDownload || '—', '', 'Timetable last downloaded')}
+      ${stat('Schedules', fmt(d.scheduleCount), '', fmt(d.uniqueServiceCount) + ' unique services')}
+      ${stat('Train Locations', fmt(d.trainLocationsCount), 'green', 'Active today')}
+      ${stat('TRUST Movements', fmt(d.trustMovementCount), '', 'Last 24 hours')}
+      ${stat('Allocations Today', fmt(d.allocationsToday), '')}
+      ${stat('HSP Unit Records', fmt(d.hspUnitCount), '')}
+      ${stat('TIPLOC Names', fmt(d.tiplocNameCount), '')}
+    `;
+    const now = new Date();
+    document.getElementById('last-updated').textContent =
+      'Updated ' + now.toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  } catch(e) {
+    document.getElementById('status-grid').innerHTML =
+      '<div class="stat-card"><div class="label" style="color:var(--red)">Failed to load status</div></div>';
+  }
+}
+
+function stat(label, value, cls='', sub='') {
+  return `<div class="stat-card">
+    <div class="label">${label}</div>
+    <div class="value ${cls}">${value}</div>
+    ${sub ? `<div class="sub">${sub}</div>` : ''}
+  </div>`;
+}
+
+function fmt(n) {
+  if (n == null) return '—';
+  return Number(n).toLocaleString('en-GB');
+}
+
+// ── Auth ────────────────────────────────────────────────────────────────
+async function checkAuth() {
+  if (!token) return;
+  const r = await fetch('/api/auth/me', { headers: { 'Authorization': 'Bearer ' + token } });
+  if (r.ok) {
+    const d = await r.json();
+    setLoggedIn(d.email);
+  } else {
+    token = null;
+    localStorage.removeItem('tt_token');
+  }
+}
+
+function setLoggedIn(email) {
+  document.getElementById('user-email').textContent = email;
+  document.getElementById('user-email').style.display = 'block';
+  document.getElementById('admin-btn').textContent = 'Admin Panel';
+  document.getElementById('logout-btn').style.display = 'inline-flex';
+}
+
+function openAdmin() {
+  if (!token) {
+    document.getElementById('login-error').textContent = '';
+    document.getElementById('login-email').value = '';
+    document.getElementById('login-password').value = '';
+    document.getElementById('login-overlay').classList.add('active');
+    setTimeout(() => document.getElementById('login-email').focus(), 50);
+  } else {
+    loadUsers();
+    loadAuditLog();
+    document.getElementById('admin-overlay').classList.add('active');
+  }
+}
+
+function closeOverlay(id) {
+  document.getElementById(id).classList.remove('active');
+}
+
+async function login() {
+  const email = document.getElementById('login-email').value.trim();
+  const password = document.getElementById('login-password').value;
+  const errEl = document.getElementById('login-error');
+  errEl.textContent = '';
+  const r = await fetch('/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password })
+  });
+  if (r.ok) {
+    const d = await r.json();
+    token = d.token;
+    localStorage.setItem('tt_token', token);
+    setLoggedIn(d.email);
+    closeOverlay('login-overlay');
+    loadUsers();
+    loadAuditLog();
+    document.getElementById('admin-overlay').classList.add('active');
+  } else {
+    errEl.textContent = 'Invalid email or password';
+  }
+}
+
+async function logout() {
+  await fetch('/api/auth/logout', { method: 'POST', headers: { 'Authorization': 'Bearer ' + token } }).catch(()=>{});
+  token = null;
+  localStorage.removeItem('tt_token');
+  document.getElementById('user-email').style.display = 'none';
+  document.getElementById('admin-btn').textContent = 'Admin';
+  document.getElementById('logout-btn').style.display = 'none';
+}
+
+// ── TIPLOC ──────────────────────────────────────────────────────────────
+async function setTiploc() {
+  const tiploc = document.getElementById('tiploc-code').value.trim().toUpperCase();
+  const name   = document.getElementById('tiploc-name').value.trim();
+  const msg = document.getElementById('tiploc-msg');
+  msg.className = 'msg';
+  if (!tiploc || !name) { msg.className = 'msg err'; msg.textContent = 'Both fields required'; return; }
+  const r = await fetch('/api/admin/tiploc-name?tiploc=' + encodeURIComponent(tiploc) + '&name=' + encodeURIComponent(name), {
+    method: 'POST', headers: { 'Authorization': 'Bearer ' + token }
+  });
+  if (r.ok) {
+    msg.className = 'msg ok';
+    msg.textContent = '✓ ' + tiploc + ' → ' + name;
+    document.getElementById('tiploc-code').value = '';
+    document.getElementById('tiploc-name').value = '';
+  } else {
+    const d = await r.json().catch(()=>({}));
+    msg.className = 'msg err';
+    msg.textContent = d.error || 'Update failed';
+  }
+}
+
+// ── Users ───────────────────────────────────────────────────────────────
+async function loadUsers() {
+  const r = await fetch('/api/admin/users', { headers: { 'Authorization': 'Bearer ' + token } });
+  if (!r.ok) return;
+  const d = await r.json();
+  const me = document.getElementById('user-email').textContent;
+  document.getElementById('users-body').innerHTML = d.users.length === 0
+    ? '<tr><td colspan="2" style="color:var(--text-dim);font-size:.8rem;padding:10px 0">No users</td></tr>'
+    : d.users.map(e => `<tr>
+        <td>${esc(e)}${e===me?' <span style="color:var(--text-dim);font-size:.72rem">(you)</span>':''}</td>
+        <td>${e!==me?`<button class="btn sm danger" onclick="deleteUser('${esc(e)}')">Remove</button>`:''}</td>
+      </tr>`).join('');
+}
+
+async function addUser() {
+  const email    = document.getElementById('new-email').value.trim();
+  const password = document.getElementById('new-password').value;
+  const msg = document.getElementById('users-msg');
+  msg.className = 'msg';
+  if (!email || password.length < 8) { msg.className = 'msg err'; msg.textContent = 'Email and 8+ char password required'; return; }
+  const r = await fetch('/api/admin/users', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password })
+  });
+  if (r.ok) {
+    msg.className = 'msg ok'; msg.textContent = '✓ User set: ' + email;
+    document.getElementById('new-email').value = '';
+    document.getElementById('new-password').value = '';
+    loadUsers();
+  } else {
+    const d = await r.json().catch(()=>({}));
+    msg.className = 'msg err'; msg.textContent = d.error || 'Failed';
+  }
+}
+
+async function deleteUser(email) {
+  if (!confirm('Remove ' + email + '?')) return;
+  await fetch('/api/admin/users/' + encodeURIComponent(email), {
+    method: 'DELETE', headers: { 'Authorization': 'Bearer ' + token }
+  });
+  loadUsers();
+}
+
+async function loadAuditLog() {
+  const r = await fetch('/api/admin/tiploc-log', { headers: { 'Authorization': 'Bearer ' + token } });
+  if (!r.ok) return;
+  const d = await r.json();
+  document.getElementById('audit-body').innerHTML = d.log.length === 0
+    ? '<tr><td colspan="4" style="color:var(--text-dim);font-size:.8rem;padding:10px 0">No changes yet</td></tr>'
+    : d.log.map(row => `<tr>
+        <td style="font-family:var(--mono);font-size:.8rem">${esc(row.tiploc||'')}</td>
+        <td>${esc(row.newName||'')}</td>
+        <td style="color:var(--text-dim);font-size:.8rem">${esc((row.changedBy||'').split('@')[0])}</td>
+        <td style="color:var(--text-dim);font-size:.78rem">${esc((row.changedAt||'').substring(0,16))}</td>
+      </tr>`).join('');
+}
+
+function esc(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// Close overlay on backdrop click
+document.querySelectorAll('.overlay').forEach(el => {
+  el.addEventListener('click', e => { if (e.target === el) el.classList.remove('active'); });
+});
+
+// Init
+checkAuth();
+loadStatus();
+setInterval(loadStatus, 30000);
+</script>
+</body>
+</html>

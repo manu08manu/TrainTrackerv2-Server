@@ -9,6 +9,7 @@ import com.traintracker.server.cif.CorpusLookup
 import com.traintracker.server.database.Schedules
 import com.traintracker.server.database.TrainLocations
 import com.traintracker.server.kafka.trainLocations
+import com.traintracker.server.kafka.TrainLocation
 import com.traintracker.server.hsp.HspClient
 import com.traintracker.server.hsp.HspMetricsRequest
 import io.ktor.http.*
@@ -154,8 +155,39 @@ data class MovementsResponse(
 )
 
 
+// ─── TrainLocation → response helpers ────────────────────────────────────────
+
+private fun TrainLocation.toResponse() = TrainLocationResponse(
+    headcode     = headcode,
+    rid          = rid,
+    stationName  = stationName,
+    crs          = crs,
+    actualTime   = actualTime,
+    eventType    = eventType,
+    delayMinutes = delayMinutes,
+    ageSeconds   = (System.currentTimeMillis() - updatedEpochMs) / 1000
+)
+
+private fun org.jetbrains.exposed.sql.ResultRow.toLocationResponse() = TrainLocationResponse(
+    headcode     = this[TrainLocations.headcode],
+    rid          = this[TrainLocations.rid],
+    stationName  = this[TrainLocations.stationName],
+    crs          = this[TrainLocations.crs],
+    actualTime   = this[TrainLocations.actualTime],
+    eventType    = this[TrainLocations.eventType],
+    delayMinutes = this[TrainLocations.delayMinutes],
+    ageSeconds   = -1L
+)
+
 fun Application.configureRoutes() {
     routing {
+        // ── GET / (main site) ────────────────────────────────────────────
+        get("/") {
+            val file = java.io.File("/opt/traintracker/index.html")
+            if (file.exists()) call.respondText(file.readText(), io.ktor.http.ContentType.Text.Html)
+            else call.respond(io.ktor.http.HttpStatusCode.NotFound, "Not found")
+        }
+
         // ── GET /dashboard ───────────────────────────────────────────────
         get("/dashboard") {
             val file = java.io.File("/opt/traintracker/dashboard.html")
@@ -341,8 +373,17 @@ fun Application.configureRoutes() {
                                             ?: CorpusLookup.crsFromStanox(rs.getString("stanox") ?: "")
                                         for (key in listOfNotNull(utcScht, scht.takeIf { it != utcScht },
                                                 crs?.let { "$it|$utcScht" }, crs?.let { "$it|$scht" })) {
-                                            if (!trustMapForService.containsKey(key)) {
+                                            val existing = trustMapForService[key]
+                                            if (existing == null) {
                                                 trustMapForService[key] = Triple(actualT, isCancelled, cancelReason)
+                                            } else {
+                                                // Merge: prefer non-empty actual time, OR the isCancelled flags.
+                                                // This handles stops that have both a movement and a cancellation
+                                                // message (e.g. a COD termination point like Bedford).
+                                                val mergedActual = if (actualT.isNotEmpty()) actualT else existing.first
+                                                val mergedCancelled = existing.second || isCancelled
+                                                val mergedReason = cancelReason ?: existing.third
+                                                trustMapForService[key] = Triple(mergedActual, mergedCancelled, mergedReason)
                                             }
                                         }
                                     }
@@ -389,11 +430,14 @@ fun Application.configureRoutes() {
                             // (that indicates a COO where cancelled stops are at the start, not the end).
                             val firstCancelIdx = propagatedCps.indexOfFirst { it.isCancelled && it.stopType != "LT" }
                             val hasTrustCancelAfterFirst = firstCancelIdx >= 0 &&
-                                (propagatedCps.drop(firstCancelIdx + 1).any { it.isCancelled } ||
-                                 propagatedCps.drop(firstCancelIdx + 1).any { it.actualTime.isNotEmpty() || trustMapForService.containsKey(it.scheduledTime) })
+                                propagatedCps.drop(firstCancelIdx + 1).any { it.actualTime.isNotEmpty() || trustMapForService.containsKey(it.scheduledTime) }
                             // Backward propagation: if a stop is cancelled and TRUST movements exist
                             // at later stops (COO pattern), mark all stops before the cancellation as cancelled too.
-                            val backPropCps = if (hasTrustCancelAfterFirst && firstCancelIdx > 0) {
+                            // Only back-propagate if stops before the first cancellation have no actual times
+                            // (i.e. train never ran from origin). If they do, it is a COD not a COO.
+                            val hasActualBeforeFirstCancel = firstCancelIdx > 0 &&
+                                propagatedCps.take(firstCancelIdx).any { it.actualTime.isNotEmpty() }
+                            val backPropCps = if (hasTrustCancelAfterFirst && firstCancelIdx > 0 && !hasActualBeforeFirstCancel) {
                                 val cancelReason = propagatedCps[firstCancelIdx].cancelReason
                                 propagatedCps.mapIndexed { idx, cp ->
                                     if (idx < firstCancelIdx && !cp.isCancelled)
@@ -535,31 +579,13 @@ fun Application.configureRoutes() {
 
                 val loc = trainLocations[headcode]
                 if (loc != null) {
-                    call.respond(TrainLocationResponse(
-                        headcode     = loc.headcode,
-                        rid          = loc.rid,
-                        stationName  = loc.stationName,
-                        crs          = loc.crs,
-                        actualTime   = loc.actualTime,
-                        eventType    = loc.eventType,
-                        delayMinutes = loc.delayMinutes,
-                        ageSeconds   = (System.currentTimeMillis() - loc.updatedEpochMs) / 1000
-                    ))
+                    call.respond(loc.toResponse())
                 } else {
                     val dbLoc = transaction {
                         TrainLocations.selectAll().where { TrainLocations.headcode eq headcode }.singleOrNull()
                     }
                     if (dbLoc != null) {
-                        call.respond(TrainLocationResponse(
-                            headcode     = dbLoc[TrainLocations.headcode],
-                            rid          = dbLoc[TrainLocations.rid],
-                            stationName  = dbLoc[TrainLocations.stationName],
-                            crs          = dbLoc[TrainLocations.crs],
-                            actualTime   = dbLoc[TrainLocations.actualTime],
-                            eventType    = dbLoc[TrainLocations.eventType],
-                            delayMinutes = dbLoc[TrainLocations.delayMinutes],
-                            ageSeconds   = -1L
-                        ))
+                        call.respond(dbLoc.toLocationResponse())
                     } else {
                         call.respond(HttpStatusCode.NotFound, "No location data for $headcode")
                     }
@@ -573,53 +599,40 @@ fun Application.configureRoutes() {
                 // Search in-memory first
                 val loc = trainLocations.values.firstOrNull { it.rid == rid }
                 if (loc != null) {
-                    call.respond(TrainLocationResponse(
-                        headcode     = loc.headcode,
-                        rid          = loc.rid,
-                        stationName  = loc.stationName,
-                        crs          = loc.crs,
-                        actualTime   = loc.actualTime,
-                        eventType    = loc.eventType,
-                        delayMinutes = loc.delayMinutes,
-                        ageSeconds   = (System.currentTimeMillis() - loc.updatedEpochMs) / 1000
-                    ))
+                    call.respond(loc.toResponse())
                 } else {
                     val dbLoc = transaction {
                         TrainLocations.selectAll().where { TrainLocations.rid eq rid }.singleOrNull()
                     }
                     if (dbLoc != null) {
-                        call.respond(TrainLocationResponse(
-                            headcode     = dbLoc[TrainLocations.headcode],
-                            rid          = dbLoc[TrainLocations.rid],
-                            stationName  = dbLoc[TrainLocations.stationName],
-                            crs          = dbLoc[TrainLocations.crs],
-                            actualTime   = dbLoc[TrainLocations.actualTime],
-                            eventType    = dbLoc[TrainLocations.eventType],
-                            delayMinutes = dbLoc[TrainLocations.delayMinutes],
-                            ageSeconds   = -1L
-                        ))
+                        call.respond(dbLoc.toLocationResponse())
                     } else {
                         call.respond(HttpStatusCode.NotFound, "No location data for rid=$rid")
                     }
                 }
             }
-            // ── GET /api/trust/movements?headcode=1A34 ────────────────────
+            // ── GET /api/trust/movements?headcode=1A34&uid=C12345 ────────
             get("/trust/movements") {
                 val headcode = call.parameters["headcode"]?.uppercase()?.trim()
                     ?: return@get call.respond(HttpStatusCode.BadRequest, "headcode required")
+                val uid = call.parameters["uid"]?.uppercase()?.trim() ?: ""
 
                 val safeHc = headcode.filter { it.isLetterOrDigit() }
+                val safeUid = uid.filter { it.isLetterOrDigit() }
                 val movements = transaction {
                     val result = mutableListOf<MovementResponse>()
+                    val whereClause = if (safeUid.isNotEmpty())
+                        "headcode='$safeHc' AND uid='$safeUid'"
+                    else
+                        "headcode='$safeHc'"
                     // Times stored in UTC — no conversion needed
-                    fun bstToUtc(t: String): String = t
-                    exec("SELECT crs, stanox, event_type, scheduled_time, actual_time, platform, is_cancelled FROM trust_movements WHERE headcode='$safeHc' AND event_ts >= datetime('now', '-3 hours') ORDER BY event_ts DESC LIMIT 50") { rs ->
+                    exec("SELECT crs, stanox, event_type, scheduled_time, actual_time, platform, is_cancelled FROM trust_movements WHERE $whereClause AND event_ts >= datetime('now', '-3 hours') ORDER BY event_ts DESC LIMIT 50") { rs ->
                         while (rs.next()) {
                             result.add(MovementResponse(
                                 crs           = rs.getString("crs") ?: rs.getString("stanox") ?: "",
                                 eventType     = rs.getString("event_type") ?: "",
-                                scheduledTime = bstToUtc(rs.getString("scheduled_time") ?: ""),
-                                actualTime    = bstToUtc(rs.getString("actual_time") ?: ""),
+                                scheduledTime = rs.getString("scheduled_time") ?: "",
+                                actualTime    = rs.getString("actual_time") ?: "",
                                 platform      = rs.getString("platform") ?: "",
                                 isCancelled   = rs.getBoolean("is_cancelled")
                             ))
@@ -895,6 +908,32 @@ fun Application.configureRoutes() {
             }
 
 
+            // ── GET /api/stations?q=wellingborough ───────────────────────────
+            get("/stations") {
+                val q = call.parameters["q"]?.trim() ?: ""
+                if (q.length < 2) {
+                    call.respond(emptyList<Map<String, String>>())
+                    return@get
+                }
+                val matches = CorpusLookup.searchStations(q, 20)
+                call.respond(matches)
+            }
+
+            // ── GET /api/kb/station-messages ──────────────────────────────
+            get("/kb/station-messages") {
+                val crs = call.request.queryParameters["crs"]
+                if (crs.isNullOrBlank()) {
+                    call.respond(HttpStatusCode.BadRequest, mapOf("error" to "crs parameter required"))
+                    return@get
+                }
+                val messages = withContext(Dispatchers.IO) { KbClient.getStationMessages(crs) }
+                if (messages == null) {
+                    call.respond(HttpStatusCode.ServiceUnavailable, mapOf("error" to "upstream unavailable"))
+                } else {
+                    call.respond(messages)
+                }
+            }
+
             // ── GET /api/kb/incidents ──────────────────────────────────────
             get("/kb/incidents") {
                 val incidents = withContext(Dispatchers.IO) { KbClient.getIncidents() }
@@ -957,21 +996,97 @@ fun Application.configureRoutes() {
                     call.respond(HttpStatusCode.NotFound, mapOf("error" to "Station $crs not found"))
                 } else {
                     call.respond(buildJsonObject {
-                        put("crs",               station.crs)
-                        put("name",              station.name)
-                        put("address",           station.address)
-                        put("telephone",         station.telephone)
-                        put("staffingNote",      station.staffingNote)
-                        put("ticketOfficeHours", station.ticketOfficeHours)
-                        put("sstmAvailability",  station.sstmAvailability)
-                        put("stepFreeAccess",    station.stepFreeAccess)
-                        put("assistanceAvail",   station.assistanceAvail)
-                        put("wifi",              station.wifi)
-                        put("toilets",           station.toilets)
-                        put("waitingRoom",       station.waitingRoom)
-                        put("cctv",              station.cctv)
-                        put("taxi",              station.taxi)
-                        put("carParking",        station.carParking)
+                        put("crs",                      station.crs)
+                        put("name",                     station.name)
+                        put("address",                  station.address)
+                        put("latitude",                 station.latitude)
+                        put("longitude",                station.longitude)
+                        put("stationOperator",          station.stationOperator)
+                        put("staffingNote",             station.staffingNote)
+                        put("ticketOfficeHours",        station.ticketOfficeHours)
+                        put("sstmAvailability",         station.sstmAvailability)
+                        put("stepFreeAccess",           station.stepFreeAccess)
+                        put("assistanceAvail",          station.assistanceAvail)
+                        put("inductionLoop",            station.inductionLoop)
+                        put("accessibleTicketMachines", station.accessibleTicketMachines)
+                        put("rampForTrainAccess",       station.rampForTrainAccess)
+                        put("wheelchairsAvailable",     station.wheelchairsAvailable)
+                        put("nationalKeyToilets",       station.nationalKeyToilets)
+                        put("ticketGates",              station.ticketGates)
+                        put("wifi",                     station.wifi)
+                        put("toilets",                  station.toilets)
+                        put("waitingRoom",              station.waitingRoom)
+                        put("cctv",                     station.cctv)
+                        put("babyChange",               station.babyChange)
+                        put("seatedArea",               station.seatedArea)
+                        put("trolleys",                 station.trolleys)
+                        put("leftLuggage",              station.leftLuggage)
+                        put("stationBuffet",            station.stationBuffet)
+                        put("showers",                  station.showers)
+                        put("atmMachine",               station.atmMachine)
+                        put("firstClassLounge",         station.firstClassLounge)
+                        put("customerHelpPoints",       station.customerHelpPoints)
+                        put("impairedMobilitySetDown",  station.impairedMobilitySetDown)
+                        put("telephones",               station.telephones)
+                        put("postBox",                  station.postBox)
+                        put("shops",                    station.shops)
+                        put("heightAdjustedCounter",    station.heightAdjustedCounter)
+                        put("accessibleTaxis",          station.accessibleTaxis)
+                        put("cycleHire",                station.cycleHire)
+                        put("taxi",                     station.taxi)
+                        put("busInterchange",           station.busInterchange)
+                        put("airport",                  station.airport)
+                        put("carParking",               station.carParking)
+                        put("carParkName",              station.carParkName)
+                        put("carParkOperator",          station.carParkOperator)
+                        put("carParkTotal",             station.carParkTotal)
+                        put("cycleSpaces",              station.cycleSpaces)
+                        put("cycleSheltered",           station.cycleSheltered)
+                    })
+                }
+            }
+
+            // ── POST /api/kb/station/cache/clear ──────────────────────────────
+            post("/kb/station/cache/clear") {
+                if (!call.checkAuth()) return@post
+                KbClient.clearStationCache()
+                call.respond(mapOf("status" to "ok"))
+            }
+
+            // ── GET /api/kb/station/{crs}/raw ─────────────────────────────────
+            get("/kb/station/{crs}/raw") {
+                val crs = call.parameters["crs"]?.uppercase()?.trim()
+                    ?: return@get call.respond(HttpStatusCode.BadRequest, "crs required")
+                val raw = withContext(Dispatchers.IO) { KbClient.getRawStation(crs) }
+                if (raw == null) call.respond(HttpStatusCode.NotFound, "Station $crs not found")
+                else call.respondText(raw, io.ktor.http.ContentType.Application.Xml)
+            }
+
+            // ── GET /api/kb/station/{crs}/messages ────────────────────────────
+            get("/kb/station/{crs}/messages") {
+                val crs = call.parameters["crs"]?.uppercase()?.trim()
+                    ?: return@get call.respond(HttpStatusCode.BadRequest, "crs required")
+                val msgs = withContext(Dispatchers.IO) { KbClient.getStationMessages(crs) }
+                if (msgs == null) {
+                    call.respond(buildJsonObject {
+                        put("crs", crs)
+                        put("disruptions", buildJsonArray {})
+                        put("stationAlerts", "")
+                    })
+                } else {
+                    call.respond(buildJsonObject {
+                        put("crs", msgs.crs)
+                        put("stationAlerts", msgs.stationAlerts)
+                        put("disruptions", buildJsonArray {
+                            msgs.disruptions.forEach { d ->
+                                add(buildJsonObject {
+                                    put("category",    d.category)
+                                    put("severity",    d.severity)
+                                    put("summary",     d.summary)
+                                    put("description", d.description)
+                                })
+                            }
+                        })
                     })
                 }
             }
@@ -1668,14 +1783,7 @@ private fun queryBoard(
             val safeWinStart = windowStart.filter { it.isDigit() || it == ':' }
             val safeWinEnd   = windowEnd.filter   { it.isDigit() || it == ':' }
             val trustMap = mutableMapOf<String, Triple<String, Boolean, String?>>()
-            val bstOffset = if (java.time.ZonedDateTime.now(java.time.ZoneId.of("Europe/London")).zone.rules.isDaylightSavings(java.time.Instant.now())) 60 else 0
-            fun bstToUtc(t: String): String {
-                if (bstOffset == 0 || t.isEmpty()) return t
-                val p = t.split(":")
-                if (p.size != 2) return t
-                val m = (p[0].toIntOrNull() ?: 0) * 60 + (p[1].toIntOrNull() ?: 0) - bstOffset
-                return "%02d:%02d".format((m + 1440) % 1440 / 60, (m + 1440) % 1440 % 60)
-            }
+
             // Query by UID — eliminates cross-train headcode contamination entirely.
             val uidInClause = sortedRows.map { "'${it[Schedules.uid]}'" }.toSet().joinToString(",")
             if (uidInClause.isNotEmpty()) {

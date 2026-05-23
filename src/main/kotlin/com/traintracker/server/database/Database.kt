@@ -519,62 +519,52 @@ object AppDatabase {
 
 
     fun snapshotUnitAllocations(date: String) {
-        val dbPath = "/opt/traintracker/traintracker.db"
-        val sql = """
-            INSERT OR REPLACE INTO hsp_unit_history
-                (core_id, headcode, service_date, scheduled_dep, uid, units, vehicles, unit_count, snapshotted_at, origin_crs, dest_crs)
-            SELECT
-                a.core_id,
-                a.headcode,
-                a.service_date,
-                COALESCE((
-                    SELECT s.scheduled_time FROM schedules s
-                    WHERE s.uid = SUBSTR(a.core_id, LENGTH(a.headcode) + 1, 6) AND s.stop_type = 'LO'
-                    AND s.stp_indicator != 'C'
-                    ORDER BY CASE s.stp_indicator WHEN 'N' THEN 0 WHEN 'O' THEN 1 WHEN 'P' THEN 2 ELSE 3 END
-                    LIMIT 1
-                ), '') AS scheduled_dep,
-                SUBSTR(a.core_id, LENGTH(a.headcode) + 1, 6) AS uid,
-                a.units,
-                a.vehicles,
-                a.unit_count,
-                datetime('now'),
-                COALESCE((
-                    SELECT s.crs FROM schedules s
-                    WHERE s.uid = SUBSTR(a.core_id, LENGTH(a.headcode) + 1, 6) AND s.stop_type = 'LO'
-                    AND s.stp_indicator != 'C'
-                    ORDER BY CASE s.stp_indicator WHEN 'N' THEN 0 WHEN 'O' THEN 1 WHEN 'P' THEN 2 ELSE 3 END
-                    LIMIT 1
-                ), '') AS origin_crs,
-                COALESCE((
-                    SELECT s.crs FROM schedules s
-                    WHERE s.uid = SUBSTR(a.core_id, LENGTH(a.headcode) + 1, 6) AND s.stop_type = 'LT'
-                    AND s.stp_indicator != 'C'
-                    ORDER BY CASE s.stp_indicator WHEN 'N' THEN 0 WHEN 'O' THEN 1 WHEN 'P' THEN 2 ELSE 3 END
-                    LIMIT 1
-                ), '') AS dest_crs
-            FROM allocation_consists a
-            WHERE a.service_date = '$date';
-        """.trimIndent()
-        val result = ProcessBuilder("sqlite3", dbPath, sql)
-            .redirectErrorStream(true)
-            .start()
-        val output = result.inputStream.bufferedReader().readText()
-        val exit = result.waitFor()
-        if (exit != 0) {
-            log.error("snapshotUnitAllocations failed (exit=$exit): $output")
-        } else {
-            val count = transaction {
-                HspUnitHistory.selectAll().where { HspUnitHistory.serviceDate eq date }.count()
-            }
-            log.info("snapshotUnitAllocations: wrote $count rows for $date")
+        // Use the existing Exposed connection pool — no shell-out to sqlite3 CLI
+        val safeDate = date.filter { it.isDigit() || it == '-' }
+        transaction {
+            exec("""
+                INSERT OR REPLACE INTO hsp_unit_history
+                    (core_id, headcode, service_date, scheduled_dep, uid, units, vehicles, unit_count, snapshotted_at, origin_crs, dest_crs)
+                SELECT
+                    a.core_id,
+                    a.headcode,
+                    a.service_date,
+                    COALESCE((
+                        SELECT s.scheduled_time FROM schedules s
+                        WHERE s.uid = SUBSTR(a.core_id, LENGTH(a.headcode) + 1, 6) AND s.stop_type = 'LO'
+                        AND s.stp_indicator != 'C'
+                        ORDER BY CASE s.stp_indicator WHEN 'N' THEN 0 WHEN 'O' THEN 1 WHEN 'P' THEN 2 ELSE 3 END
+                        LIMIT 1
+                    ), '') AS scheduled_dep,
+                    SUBSTR(a.core_id, LENGTH(a.headcode) + 1, 6) AS uid,
+                    a.units,
+                    a.vehicles,
+                    a.unit_count,
+                    datetime('now'),
+                    COALESCE((
+                        SELECT s.crs FROM schedules s
+                        WHERE s.uid = SUBSTR(a.core_id, LENGTH(a.headcode) + 1, 6) AND s.stop_type = 'LO'
+                        AND s.stp_indicator != 'C'
+                        ORDER BY CASE s.stp_indicator WHEN 'N' THEN 0 WHEN 'O' THEN 1 WHEN 'P' THEN 2 ELSE 3 END
+                        LIMIT 1
+                    ), '') AS origin_crs,
+                    COALESCE((
+                        SELECT s.crs FROM schedules s
+                        WHERE s.uid = SUBSTR(a.core_id, LENGTH(a.headcode) + 1, 6) AND s.stop_type = 'LT'
+                        AND s.stp_indicator != 'C'
+                        ORDER BY CASE s.stp_indicator WHEN 'N' THEN 0 WHEN 'O' THEN 1 WHEN 'P' THEN 2 ELSE 3 END
+                        LIMIT 1
+                    ), '') AS dest_crs
+                FROM allocation_consists a
+                WHERE a.service_date = '$safeDate'
+            """.trimIndent())
         }
+        val count = transaction {
+            HspUnitHistory.selectAll().where { HspUnitHistory.serviceDate eq safeDate }.count()
+        }
+        log.info("snapshotUnitAllocations: wrote $count rows for $safeDate")
     }
 
-        /**
-         * Resolve an origin CRS for a RID by scanning hsp_cache metrics entries.
-         * Falls back to CorpusLookup to convert tiploc -> CRS.
-         */
         /**
          * Resolve origin CRS for a RID.
          * Strategy A: look up the UID (suffix after date in RID) in the schedules table LO stop.

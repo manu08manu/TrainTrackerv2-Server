@@ -60,22 +60,20 @@ object Config {
     val sqlitePath:       String  = System.getenv("SQLITE_PATH") ?: "./traintracker.db"
 
 
-    // Knowledgebase feeds
-    val kbNsiKey:          String = System.getenv("KB_NSI_KEY") ?: ""
-    val kbNsiSecret:       String = System.getenv("KB_NSI_SECRET") ?: ""
-    val kbNsiTokenUrl:     String = System.getenv("KB_NSI_TOKEN_URL") ?: ""
-    val kbNsiUrl:          String = System.getenv("KB_NSI_URL") ?: ""
-    val kbIncidentsKey:    String = System.getenv("KB_INCIDENTS_KEY") ?: ""
-    val kbIncidentsSecret: String = System.getenv("KB_INCIDENTS_SECRET") ?: ""
-    val kbIncidentsTokenUrl: String = System.getenv("KB_INCIDENTS_TOKEN_URL") ?: ""
-    val kbIncidentsUrl:    String = System.getenv("KB_INCIDENTS_URL") ?: ""
-    val kbStationsKey:     String = System.getenv("KB_STATIONS_KEY") ?: ""
-    val kbStationsSecret:  String = System.getenv("KB_STATIONS_SECRET") ?: ""
-    val kbStationsUrl:     String = System.getenv("KB_STATIONS_URL") ?: ""
-    val kbTocKey:          String = System.getenv("KB_TOC_KEY") ?: ""
-    val kbTocSecret:       String = System.getenv("KB_TOC_SECRET") ?: ""
-    val kbTocTokenUrl:     String = System.getenv("KB_TOC_TOKEN_URL") ?: ""
-    val kbTocUrl:          String = System.getenv("KB_TOC_URL") ?: ""
+    // Disruptions Experience API (new JSON feed — single x-apikey)
+    val kbDisruptionsKey: String = System.getenv("KB_DISRUPTIONS_KEY") ?: ""
+    val kbDisruptionsUrl: String = System.getenv("KB_DISRUPTIONS_URL") ?: ""
+
+    // Stations XML feed (unchanged)
+    val kbStationsKey:    String = System.getenv("KB_STATIONS_KEY") ?: ""
+    val kbStationsSecret: String = System.getenv("KB_STATIONS_SECRET") ?: ""
+    val kbStationsUrl:    String = System.getenv("KB_STATIONS_URL") ?: ""
+
+    // TOC XML feed (unchanged)
+    val kbTocKey:      String = System.getenv("KB_TOC_KEY") ?: ""
+    val kbTocSecret:   String = System.getenv("KB_TOC_SECRET") ?: ""
+    val kbTocTokenUrl: String = System.getenv("KB_TOC_TOKEN_URL") ?: ""
+    val kbTocUrl:      String = System.getenv("KB_TOC_URL") ?: ""
 
     val useOracle: Boolean get() = oracleDbUrl != null
 

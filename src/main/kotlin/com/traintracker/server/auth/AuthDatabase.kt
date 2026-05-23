@@ -23,8 +23,6 @@ object AuthDatabase {
                     expires_at TEXT NOT NULL
                 )
             """.trimIndent())
-        }
-        transaction {
             exec("""
                 CREATE TABLE IF NOT EXISTS tiploc_audit (
                     id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -44,21 +42,24 @@ object AuthDatabase {
         val hash = BCrypt.hashpw(password, BCrypt.gensalt())
         return try {
             transaction {
-                exec("DELETE FROM admin_users WHERE email = '${e(email)}'")
-                exec("INSERT INTO admin_users (email, password_hash) VALUES ('${e(email)}', '${e(hash)}')")
+                execPrepared("DELETE FROM admin_users WHERE email = ?", email)
+                execPrepared(
+                    "INSERT INTO admin_users (email, password_hash) VALUES (?, ?)",
+                    email, hash
+                )
             }
             log.info("User set: $email")
             true
         } catch (ex: Exception) {
-            log.error("setUser failed: \${ex.message}")
+            log.error("setUser failed: ${ex.message}")
             false
         }
     }
 
     fun deleteUser(email: String) {
         transaction {
-            exec("DELETE FROM admin_users WHERE email = '${e(email)}'")
-            exec("DELETE FROM admin_sessions WHERE email = '${e(email)}'")
+            execPrepared("DELETE FROM admin_users WHERE email = ?", email)
+            execPrepared("DELETE FROM admin_sessions WHERE email = ?", email)
         }
     }
 
@@ -75,7 +76,7 @@ object AuthDatabase {
     fun login(email: String, password: String): String? {
         var hash: String? = null
         transaction {
-            exec("SELECT password_hash FROM admin_users WHERE email = '${e(email)}'") { rs ->
+            execQuery("SELECT password_hash FROM admin_users WHERE email = ?", email) { rs ->
                 if (rs.next()) hash = rs.getString(1)
             }
         }
@@ -83,7 +84,10 @@ object AuthDatabase {
         if (!BCrypt.checkpw(password, stored)) return null
         val token = UUID.randomUUID().toString()
         transaction {
-            exec("INSERT INTO admin_sessions (token, email, expires_at) VALUES ('$token', '${e(email)}', datetime('now', '+7 days'))")
+            execPrepared(
+                "INSERT INTO admin_sessions (token, email, expires_at) VALUES (?, ?, datetime('now', '+7 days'))",
+                token, email
+            )
         }
         return token
     }
@@ -91,7 +95,10 @@ object AuthDatabase {
     fun validateSession(token: String): String? {
         var email: String? = null
         transaction {
-            exec("SELECT email FROM admin_sessions WHERE token = '${e(token)}' AND expires_at > datetime('now')") { rs ->
+            execQuery(
+                "SELECT email FROM admin_sessions WHERE token = ? AND expires_at > datetime('now')",
+                token
+            ) { rs ->
                 if (rs.next()) email = rs.getString(1)
             }
         }
@@ -99,13 +106,18 @@ object AuthDatabase {
     }
 
     fun logout(token: String) {
-        transaction { exec("DELETE FROM admin_sessions WHERE token = '${e(token)}'") }
+        transaction {
+            execPrepared("DELETE FROM admin_sessions WHERE token = ?", token)
+        }
     }
 
     fun logTiplocChange(tiploc: String, oldName: String?, newName: String, changedBy: String) {
         try {
             transaction {
-                exec("INSERT INTO tiploc_audit (tiploc, old_name, new_name, changed_by) VALUES ('${e(tiploc)}', ${if (oldName != null) "'${e(oldName)}'" else "NULL"}, '${e(newName)}', '${e(changedBy)}')")
+                execPrepared(
+                    "INSERT INTO tiploc_audit (tiploc, old_name, new_name, changed_by) VALUES (?, ?, ?, ?)",
+                    tiploc, oldName ?: "", newName, changedBy
+                )
             }
         } catch (ex: Exception) {
             log.warn("tiploc_audit insert failed: ${ex.message}")
@@ -128,5 +140,27 @@ object AuthDatabase {
         return rows
     }
 
-    private fun e(s: String) = s.replace("'", "''")
+    // ── Prepared statement helpers ────────────────────────────────────────────
+
+    /** Execute a DML statement (INSERT/UPDATE/DELETE) with parameters. */
+    private fun org.jetbrains.exposed.sql.Transaction.execPrepared(sql: String, vararg params: String) {
+        val conn = (this.connection as org.jetbrains.exposed.sql.statements.jdbc.JdbcConnectionImpl).connection
+        conn.prepareStatement(sql).use { stmt ->
+            params.forEachIndexed { i, v -> stmt.setString(i + 1, v) }
+            stmt.executeUpdate()
+        }
+    }
+
+    /** Execute a SELECT with parameters and process the ResultSet. */
+    private fun org.jetbrains.exposed.sql.Transaction.execQuery(
+        sql: String,
+        vararg params: String,
+        block: (java.sql.ResultSet) -> Unit
+    ) {
+        val conn = (this.connection as org.jetbrains.exposed.sql.statements.jdbc.JdbcConnectionImpl).connection
+        conn.prepareStatement(sql).use { stmt ->
+            params.forEachIndexed { i, v -> stmt.setString(i + 1, v) }
+            block(stmt.executeQuery())
+        }
+    }
 }
