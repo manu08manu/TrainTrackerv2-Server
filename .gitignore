@@ -1,0 +1,8 @@
+build/
+.gradle/
+.kotlin/
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
+*.db
+env.conf
+.env
