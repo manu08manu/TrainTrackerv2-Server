@@ -10,7 +10,7 @@ version = "2.0.0"
 
 val ktorVersion = "3.1.3"
 val exposedVersion = "1.3.1"
-val kafkaVersion = "3.7.0"
+val kafkaVersion = "4.4.0"
 
 repositories { mavenCentral() }
 
