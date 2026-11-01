@@ -46,7 +46,7 @@ dependencies {
     // Needed when ORACLE_DB_URL is set (AppDatabase.buildOraclePool loads oracle.jdbc.OracleDriver by name).
     implementation("com.oracle.database.jdbc:ojdbc11:23.3.0.23.09")
     implementation("com.oracle.database.jdbc:ucp:23.3.0.23.09")
-    implementation("org.xerial:sqlite-jdbc:3.45.3.0")
+    implementation("org.xerial:sqlite-jdbc:3.54.1.0")
     implementation("org.json:json:20260814")
     implementation("org.mindrot:jbcrypt:0.4")
     implementation("ch.qos.logback:logback-classic:1.6.6")
