@@ -23,8 +23,8 @@ import java.time.format.DateTimeFormatter
 import java.util.Base64
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.GZIPInputStream
-import org.jetbrains.exposed.sql.batchInsert
-import org.jetbrains.exposed.sql.transactions.transaction
+import org.jetbrains.exposed.v1.jdbc.batchInsert
+import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 import org.json.JSONObject
 import org.slf4j.LoggerFactory
 
@@ -205,7 +205,7 @@ object CifParser {
                 val okDates = validFrom != null && validTo != null && !today.isBefore(validFrom) && !today.isAfter(validTo)
                 val okDow = daysRun.length < 7 || daysRun[todayDow.value - 1] == '1'
                 if (okStp && okDates && okDow && mainUid.isNotEmpty() && assocUid.isNotEmpty() && assocTiploc.isNotEmpty()) {
-                    associations.add(AssociationRecord(mainUid, assocUid, assocTiploc, assocType, stpInd!!, dateInd))
+                    associations.add(AssociationRecord(mainUid, assocUid, assocTiploc, assocType, stpInd, dateInd))
                 }
             } catch (e: Exception) {
             }

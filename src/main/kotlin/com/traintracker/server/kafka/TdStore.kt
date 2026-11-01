@@ -3,7 +3,7 @@ package com.traintracker.server.kafka
 import com.traintracker.server.database.Retention
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
-import org.jetbrains.exposed.sql.transactions.transaction
+import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 import org.slf4j.LoggerFactory
 
 private val log = LoggerFactory.getLogger("TdStore")

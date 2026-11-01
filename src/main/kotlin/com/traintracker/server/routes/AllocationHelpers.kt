@@ -1,10 +1,10 @@
 package com.traintracker.server.routes
 
-import org.jetbrains.exposed.sql.IColumnType
-import org.jetbrains.exposed.sql.Transaction
-import org.jetbrains.exposed.sql.VarCharColumnType
+import org.jetbrains.exposed.v1.core.IColumnType
+import org.jetbrains.exposed.v1.jdbc.JdbcTransaction
+import org.jetbrains.exposed.v1.core.VarCharColumnType
 
-fun Transaction.isUidWhollyCancelled(uid: String, date: String): Boolean {
+fun JdbcTransaction.isUidWhollyCancelled(uid: String, date: String): Boolean {
     val colType: IColumnType<*> = VarCharColumnType()
     fun bind(v: String): Pair<IColumnType<*>, Any?> = colType to (v as Any?)
     var found = false
@@ -17,7 +17,7 @@ fun Transaction.isUidWhollyCancelled(uid: String, date: String): Boolean {
     return found
 }
 
-fun Transaction.lookupJoinsInto(uid: String, date: String): Pair<String?, String?> {
+fun JdbcTransaction.lookupJoinsInto(uid: String, date: String): Pair<String?, String?> {
     val colType: IColumnType<*> = VarCharColumnType()
     fun bind(v: String): Pair<IColumnType<*>, Any?> = colType to (v as Any?)
     fun unitsOf(u: String): Set<String> =
@@ -44,7 +44,7 @@ fun Transaction.lookupJoinsInto(uid: String, date: String): Pair<String?, String
     return joinsUid to joinsHeadcode
 }
 
-fun Transaction.lookupUnits(uid: String, date: String): String? {
+fun JdbcTransaction.lookupUnits(uid: String, date: String): String? {
     val colType: IColumnType<*> = VarCharColumnType()
     fun bind(v: String): Pair<IColumnType<*>, Any?> = colType to (v as Any?)
     var units: String? = null
@@ -54,7 +54,7 @@ fun Transaction.lookupUnits(uid: String, date: String): String? {
     return units?.takeIf { it.isNotBlank() }
 }
 
-fun Transaction.lookupCoachCount(uid: String, date: String): Int? {
+fun JdbcTransaction.lookupCoachCount(uid: String, date: String): Int? {
     val colType: IColumnType<*> = VarCharColumnType()
     fun bind(v: String): Pair<IColumnType<*>, Any?> = colType to (v as Any?)
     var vehicles: String? = null
@@ -74,7 +74,7 @@ fun timeDiffMinutes(a: String, b: String): Int {
     }
 }
 
-fun Transaction.detectUnitBasedSplitParent(uid: String, date: String): SplitCandidate? {
+fun JdbcTransaction.detectUnitBasedSplitParent(uid: String, date: String): SplitCandidate? {
     val myUnits = lookupUnits(uid, date)?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() }?.toSet() ?: return null
     if (myUnits.isEmpty()) return null
     val colType: IColumnType<*> = VarCharColumnType()
@@ -106,7 +106,7 @@ fun Transaction.detectUnitBasedSplitParent(uid: String, date: String): SplitCand
     return null
 }
 
-fun Transaction.detectUnitBasedSplits(uid: String, date: String): List<SplitCandidate> {
+fun JdbcTransaction.detectUnitBasedSplits(uid: String, date: String): List<SplitCandidate> {
     val myUnits = lookupUnits(uid, date)?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() }?.toSet() ?: return emptyList()
     if (myUnits.size < 2) return emptyList()
     val colType: IColumnType<*> = VarCharColumnType()
@@ -163,7 +163,7 @@ fun Transaction.detectUnitBasedSplits(uid: String, date: String): List<SplitCand
         .map { it.candidate }
 }
 
-fun Transaction.unitsDividingAt(uid: String, date: String, tiploc: String): Set<String>? {
+fun JdbcTransaction.unitsDividingAt(uid: String, date: String, tiploc: String): Set<String>? {
     val colType: IColumnType<*> = VarCharColumnType()
     fun bind(v: String): Pair<IColumnType<*>, Any?> = colType to (v as Any?)
     val ends = mutableSetOf<String>()

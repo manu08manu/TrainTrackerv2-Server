@@ -3,7 +3,7 @@ package com.traintracker.server.cif
 import com.traintracker.server.auth.AuthDatabase
 import com.traintracker.server.database.AppDatabase
 import java.util.concurrent.ConcurrentHashMap
-import org.jetbrains.exposed.sql.transactions.transaction
+import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 import org.slf4j.LoggerFactory
 
 private val log = LoggerFactory.getLogger("CorpusLookup")
