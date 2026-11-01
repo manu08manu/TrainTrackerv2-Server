@@ -109,6 +109,7 @@ object TrustMovements : Table("trust_movements") {
     val idxHc = index("idx_trust_hc", false, headcode)
     val idxTs = index("idx_trust_ts", false, eventTs)
     val idxCrsTime = index("idx_trust_crs_time", false, crs, scheduledTime)
+    val idxUidTs = index("idx_trust_uid", false, uid, eventTs)
 }
 
 object TrainLocations : Table("train_locations") {
@@ -163,6 +164,8 @@ object TrainActivations : Table("train_activations") {
     val originStanox: Column<String?> = varchar("origin_stanox", 10).nullable()
 
     override val primaryKey = PrimaryKey(trainId)
+
+    val idxUid = index("idx_activations_uid", false, uid)
 }
 
 object DarwinPlatforms : Table("darwin_platforms") {
@@ -173,6 +176,8 @@ object DarwinPlatforms : Table("darwin_platforms") {
     val updatedAt: Column<String> = varchar("updated_at", 20)
 
     override val primaryKey = PrimaryKey(uid, tiploc)
+
+    val idxUpdated = index("idx_darwin_platforms_updated", false, updatedAt)
 }
 
 object CifAssociations : Table("cif_associations") {
@@ -209,6 +214,7 @@ object AllocationConsists : Table("allocation_consists") {
     override val primaryKey = PrimaryKey(coreId, name = "pk_allocation_consists")
 
     val idxHcDate = index("idx_alloc_hc_date", false, headcode, serviceDate)
+    val idxUidDate = index("idx_alloc_consists_uid_date", false, uid, serviceDate)
 }
 
 object AllocationHistory : Table("allocation_history") {
@@ -226,6 +232,7 @@ object AllocationHistory : Table("allocation_history") {
 
     val idxCoreDate = index("idx_alloc_hist_core_date", false, coreId, serviceDate)
     val idxDate = index("idx_alloc_hist_date", false, serviceDate)
+    val idxUidDate = index("idx_alloc_hist_uid_date", false, uid, serviceDate)
 }
 
 object AllocationChanges : Table("allocation_changes") {
