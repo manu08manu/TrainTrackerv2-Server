@@ -41,7 +41,7 @@ dependencies {
     implementation("org.jetbrains.exposed:exposed-migration-jdbc:$exposedVersion")
     implementation("org.apache.kafka:kafka-clients:$kafkaVersion")
 
-    implementation("com.zaxxer:HikariCP:5.1.0")
+    implementation("com.zaxxer:HikariCP:7.1.0")
     // Oracle JDBC + UCP (listed before sqlite-jdbc: first META-INF/services/java.sql.Driver wins, as in the live jar), bundled in the live jar (oracle/jdbc/driver/BuildInfo: 23.3.0.23.09, javac 11).
     // Needed when ORACLE_DB_URL is set (AppDatabase.buildOraclePool loads oracle.jdbc.OracleDriver by name).
     implementation("com.oracle.database.jdbc:ojdbc11:23.3.0.23.09")
