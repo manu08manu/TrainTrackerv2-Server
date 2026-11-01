@@ -49,8 +49,8 @@ dependencies {
     implementation("org.xerial:sqlite-jdbc:3.45.3.0")
     implementation("org.json:json:20260814")
     implementation("org.mindrot:jbcrypt:0.4")
-    implementation("ch.qos.logback:logback-classic:1.5.6")
-    implementation("org.slf4j:slf4j-api:2.0.16")
+    implementation("ch.qos.logback:logback-classic:1.6.6")
+    implementation("org.slf4j:slf4j-api:2.0.20")
 }
 
 tasks.shadowJar {
