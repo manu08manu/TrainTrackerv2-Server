@@ -6,9 +6,9 @@ import com.traintracker.server.database.AssociationRecord
 import com.traintracker.server.database.effectiveDateFor
 import com.traintracker.server.database.scheduleDateScopeArgs
 import kotlinx.serialization.Serializable
-import org.jetbrains.exposed.sql.IColumnType
-import org.jetbrains.exposed.sql.Transaction
-import org.jetbrains.exposed.sql.VarCharColumnType
+import org.jetbrains.exposed.v1.core.IColumnType
+import org.jetbrains.exposed.v1.jdbc.JdbcTransaction
+import org.jetbrains.exposed.v1.core.VarCharColumnType
 import java.time.LocalDate
 
 @Serializable
@@ -43,7 +43,7 @@ data class AssociationContext(
     val assocUnits: Map<String, Set<String>>
 )
 
-fun Transaction.buildAssociationContext(uids: Set<String>, date: String = LocalDate.now().toString()): AssociationContext {
+fun JdbcTransaction.buildAssociationContext(uids: Set<String>, date: String = LocalDate.now().toString()): AssociationContext {
     val effDate = effectiveDateFor(date)
     val assocMap = AppDatabase.getAssociationsForUids(uids)
     val reverseAssocMap = AppDatabase.getReverseAssociationsForUids(uids)

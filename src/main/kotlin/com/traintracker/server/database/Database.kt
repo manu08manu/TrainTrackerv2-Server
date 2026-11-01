@@ -14,45 +14,49 @@ import java.time.LocalDateTime
 import java.time.ZoneOffset
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.locks.ReentrantLock
-import org.jetbrains.exposed.sql.Column
-import org.jetbrains.exposed.sql.Database
-import org.jetbrains.exposed.sql.Expression
-import org.jetbrains.exposed.sql.ExpressionWithColumnType
-import org.jetbrains.exposed.sql.IColumnType
-import org.jetbrains.exposed.sql.ISqlExpressionBuilder
-import org.jetbrains.exposed.sql.Op
-import org.jetbrains.exposed.sql.ResultRow
-import org.jetbrains.exposed.sql.SchemaUtils
-import org.jetbrains.exposed.sql.SortOrder
-import org.jetbrains.exposed.sql.SqlExpressionBuilder
-import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
-import org.jetbrains.exposed.sql.SqlExpressionBuilder.less
-import org.jetbrains.exposed.sql.Table
-import org.jetbrains.exposed.sql.Transaction
-import org.jetbrains.exposed.sql.VarCharColumnType
-import org.jetbrains.exposed.sql.and
-import org.jetbrains.exposed.sql.batchInsert
-import org.jetbrains.exposed.sql.batchReplace
-import org.jetbrains.exposed.sql.deleteAll
-import org.jetbrains.exposed.sql.deleteWhere
-import org.jetbrains.exposed.sql.insert
-import org.jetbrains.exposed.sql.insertIgnore
-import org.jetbrains.exposed.sql.javatime.datetime
-import org.jetbrains.exposed.sql.or
-import org.jetbrains.exposed.sql.replace
-import org.jetbrains.exposed.sql.selectAll
-import org.jetbrains.exposed.sql.statements.BatchInsertStatement
-import org.jetbrains.exposed.sql.statements.BatchReplaceStatement
-import org.jetbrains.exposed.sql.statements.DeleteStatement
-import org.jetbrains.exposed.sql.statements.InsertStatement
-import org.jetbrains.exposed.sql.statements.ReplaceStatement
-import org.jetbrains.exposed.sql.statements.UpdateBuilder
-import org.jetbrains.exposed.sql.statements.UpsertStatement
-import org.jetbrains.exposed.sql.statements.api.ExposedConnection
-import org.jetbrains.exposed.sql.statements.jdbc.JdbcConnectionImpl
-import org.jetbrains.exposed.sql.transactions.TransactionManager
-import org.jetbrains.exposed.sql.transactions.transaction
-import org.jetbrains.exposed.sql.upsert
+import org.jetbrains.exposed.v1.core.Column
+import org.jetbrains.exposed.v1.jdbc.Database
+import org.jetbrains.exposed.v1.core.Expression
+import org.jetbrains.exposed.v1.core.ExpressionWithColumnType
+import org.jetbrains.exposed.v1.core.IColumnType
+import org.jetbrains.exposed.v1.core.Op
+import org.jetbrains.exposed.v1.core.ResultRow
+import org.jetbrains.exposed.v1.core.SortOrder
+import org.jetbrains.exposed.v1.core.eq
+import org.jetbrains.exposed.v1.core.less
+import org.jetbrains.exposed.v1.core.lessEq
+import org.jetbrains.exposed.v1.core.greaterEq
+import org.jetbrains.exposed.v1.core.like
+import org.jetbrains.exposed.v1.core.neq
+import org.jetbrains.exposed.v1.core.inList
+import org.jetbrains.exposed.v1.jdbc.select
+import org.jetbrains.exposed.v1.core.Table
+import org.jetbrains.exposed.v1.migration.jdbc.MigrationUtils
+import org.jetbrains.exposed.v1.jdbc.JdbcTransaction
+import org.jetbrains.exposed.v1.core.VarCharColumnType
+import org.jetbrains.exposed.v1.core.and
+import org.jetbrains.exposed.v1.jdbc.batchInsert
+import org.jetbrains.exposed.v1.jdbc.batchReplace
+import org.jetbrains.exposed.v1.jdbc.deleteAll
+import org.jetbrains.exposed.v1.jdbc.deleteWhere
+import org.jetbrains.exposed.v1.jdbc.insert
+import org.jetbrains.exposed.v1.jdbc.insertIgnore
+import org.jetbrains.exposed.v1.javatime.datetime
+import org.jetbrains.exposed.v1.core.or
+import org.jetbrains.exposed.v1.jdbc.replace
+import org.jetbrains.exposed.v1.jdbc.selectAll
+import org.jetbrains.exposed.v1.core.statements.BatchInsertStatement
+import org.jetbrains.exposed.v1.core.statements.BatchReplaceStatement
+import org.jetbrains.exposed.v1.core.statements.DeleteStatement
+import org.jetbrains.exposed.v1.core.statements.InsertStatement
+import org.jetbrains.exposed.v1.core.statements.ReplaceStatement
+import org.jetbrains.exposed.v1.core.statements.UpdateBuilder
+import org.jetbrains.exposed.v1.core.statements.UpsertStatement
+import org.jetbrains.exposed.v1.jdbc.statements.api.ExposedConnection
+import org.jetbrains.exposed.v1.jdbc.statements.jdbc.JdbcConnectionImpl
+import org.jetbrains.exposed.v1.jdbc.transactions.TransactionManager
+import org.jetbrains.exposed.v1.jdbc.transactions.transaction
+import org.jetbrains.exposed.v1.jdbc.upsert
 import org.json.JSONObject
 import org.slf4j.LoggerFactory
 
@@ -294,7 +298,7 @@ fun dayRunLikePattern(date: String): String {
     return (1..7).joinToString("") { if (it == dow) "1" else "_" }
 }
 
-fun scheduleDateScope(date: String): Op<Boolean> = with(SqlExpressionBuilder) {
+fun scheduleDateScope(date: String): Op<Boolean> = run {
     ((Schedules.scheduleStartDate lessEq date) and
         (Schedules.scheduleEndDate greaterEq date) and
         (Schedules.daysRun like dayRunLikePattern(date))) or
@@ -458,7 +462,7 @@ object AppDatabase {
 
     private fun createTables() {
         transaction {
-            SchemaUtils.createMissingTablesAndColumns(
+            val tables = arrayOf<Table>(
                 HspCache,
                 Schedules,
                 TrustMovements,
@@ -474,6 +478,14 @@ object AppDatabase {
                 DarwinRidUid,
                 TrainActivations,
             )
+            MigrationUtils.statementsRequiredForDatabaseMigration(*tables).forEach { sql ->
+                if (sql.uppercase().contains("DROP ")) {
+                    log.warn("Schema drop skipped: $sql")
+                } else {
+                    log.info("Schema change: $sql")
+                    exec(sql)
+                }
+            }
             try {
                 exec("CREATE INDEX IF NOT EXISTS idx_sched_crs_time ON schedules(crs, scheduled_time)")
                 exec("CREATE INDEX IF NOT EXISTS idx_trust_hc ON trust_movements(headcode)")
@@ -486,6 +498,7 @@ object AppDatabase {
                 exec("CREATE INDEX IF NOT EXISTS idx_alloc_hist_date ON allocation_history(service_date)")
                 exec("CREATE INDEX IF NOT EXISTS idx_alloc_consists_uid_date ON allocation_consists(uid, service_date)")
                 exec("CREATE INDEX IF NOT EXISTS idx_alloc_hist_uid_date ON allocation_history(uid, service_date)")
+                exec("CREATE INDEX IF NOT EXISTS idx_darwin_platforms_updated ON darwin_platforms(updated_at)")
             } catch (e: Exception) {
             }
         }
@@ -1435,7 +1448,7 @@ object AppDatabase {
                     if (rs.next()) myOriginTime = rs.getString("tm")
                 }
                 val minTime = myTerminusTime
-                val terminusRolledOver = myOriginTime != null && minTime != null && minTime < myOriginTime!!
+                val terminusRolledOver = myOriginTime != null && minTime != null && minTime < myOriginTime
                 val nextDateStr = try {
                     LocalDate.parse(safeDate).plusDays(1).toString()
                 } catch (e: Exception) {
@@ -1476,7 +1489,7 @@ object AppDatabase {
                             }
                         }
                     }
-                    if (bestUid != null) seen.putIfAbsent(bestUid!!, bestHc to (bestSd ?: safeDate))
+                    if (bestUid != null) seen.putIfAbsent(bestUid, bestHc to (bestSd ?: safeDate))
                 }
                 seen.entries.map { Triple(it.key, it.value.first, it.value.second) }
             }
@@ -1564,7 +1577,7 @@ object AppDatabase {
                             }
                         }
                     }
-                    if (bestUid != null) seen.putIfAbsent(bestUid!!, bestHc to (bestBucketDate ?: safeDate))
+                    if (bestUid != null) seen.putIfAbsent(bestUid, bestHc to (bestBucketDate ?: safeDate))
                 }
                 seen.entries.map { Triple(it.key, it.value.first, it.value.second) }
             }

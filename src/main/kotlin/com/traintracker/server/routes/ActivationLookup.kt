@@ -1,13 +1,13 @@
 package com.traintracker.server.routes
 
-import org.jetbrains.exposed.sql.Transaction
+import org.jetbrains.exposed.v1.jdbc.JdbcTransaction
 
 internal data class ActivationInfo(
     val updatedAt: String,
     val originStanox: String?
 )
 
-internal fun Transaction.activationsFor(uids: Collection<String>, date: String): Map<String, ActivationInfo> {
+internal fun JdbcTransaction.activationsFor(uids: Collection<String>, date: String): Map<String, ActivationInfo> {
     if (uids.isEmpty()) return emptyMap()
     val dayOfMonth = date.takeLast(2)
     val result = mutableMapOf<String, ActivationInfo>()

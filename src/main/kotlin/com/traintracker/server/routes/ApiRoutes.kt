@@ -32,9 +32,9 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.put
-import org.jetbrains.exposed.sql.IColumnType
-import org.jetbrains.exposed.sql.VarCharColumnType
-import org.jetbrains.exposed.sql.transactions.transaction
+import org.jetbrains.exposed.v1.core.IColumnType
+import org.jetbrains.exposed.v1.core.VarCharColumnType
+import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 import java.time.LocalDate
 import com.traintracker.server.ReasonCodes
 import com.traintracker.server.cif.CorpusLookup
@@ -48,20 +48,20 @@ import com.traintracker.server.database.effectiveDateFor
 import com.traintracker.server.database.scheduleDateScope
 import com.traintracker.server.database.scheduleDateScopeArgs
 import com.traintracker.server.kafka.TrainLocation
-import org.jetbrains.exposed.sql.ResultRow
-import org.jetbrains.exposed.sql.Op
-import org.jetbrains.exposed.sql.min
-import org.jetbrains.exposed.sql.max
-import org.jetbrains.exposed.sql.SortOrder
-import org.jetbrains.exposed.sql.SqlExpressionBuilder.greaterEq
-import org.jetbrains.exposed.sql.SqlExpressionBuilder.lessEq
-import org.jetbrains.exposed.sql.SqlExpressionBuilder.neq
-import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
-import org.jetbrains.exposed.sql.SqlExpressionBuilder.inList
-import org.jetbrains.exposed.sql.and
-import org.jetbrains.exposed.sql.or
-import org.jetbrains.exposed.sql.select
-import org.jetbrains.exposed.sql.selectAll
+import org.jetbrains.exposed.v1.core.ResultRow
+import org.jetbrains.exposed.v1.core.Op
+import org.jetbrains.exposed.v1.core.min
+import org.jetbrains.exposed.v1.core.max
+import org.jetbrains.exposed.v1.core.SortOrder
+import org.jetbrains.exposed.v1.core.greaterEq
+import org.jetbrains.exposed.v1.core.lessEq
+import org.jetbrains.exposed.v1.core.neq
+import org.jetbrains.exposed.v1.core.eq
+import org.jetbrains.exposed.v1.core.inList
+import org.jetbrains.exposed.v1.core.and
+import org.jetbrains.exposed.v1.core.or
+import org.jetbrains.exposed.v1.jdbc.select
+import org.jetbrains.exposed.v1.jdbc.selectAll
 import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
@@ -1500,7 +1500,7 @@ private fun queryBoard(
                 val isCancelledFinal2 = isCancelledFinal ||
                     (
                         actualTime.isEmpty() && !uidLastDelay.containsKey(row[Schedules.uid]) &&
-                            ScheduleCancellations.isCancelled(row[Schedules.uid], date.toString())
+                            ScheduleCancellations.isCancelled(row[Schedules.uid], date)
                         )
                 val ttBoardCancelled = isCancelledFinal2 && !isCancelledFinal
                 val uidDelay = uidLastDelay[row[Schedules.uid]]

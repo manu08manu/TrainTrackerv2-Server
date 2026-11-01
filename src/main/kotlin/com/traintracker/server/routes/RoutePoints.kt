@@ -1,6 +1,6 @@
 package com.traintracker.server.routes
 
-import org.jetbrains.exposed.sql.transactions.transaction
+import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 import org.slf4j.LoggerFactory
 import java.time.Instant
 import java.time.LocalDate

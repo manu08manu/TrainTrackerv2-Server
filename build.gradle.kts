@@ -1,6 +1,6 @@
 plugins {
-    kotlin("jvm") version "2.1.21"
-    kotlin("plugin.serialization") version "2.1.21"
+    kotlin("jvm") version "2.3.21"
+    kotlin("plugin.serialization") version "2.3.21"
     id("com.gradleup.shadow") version "8.3.6"
     application
 }
@@ -9,7 +9,7 @@ group = "com.traintracker"
 version = "2.0.0"
 
 val ktorVersion = "3.1.3"
-val exposedVersion = "0.61.0"
+val exposedVersion = "1.3.1"
 val kafkaVersion = "3.7.0"
 
 repositories { mavenCentral() }
@@ -38,6 +38,7 @@ dependencies {
     implementation("org.jetbrains.exposed:exposed-core:$exposedVersion")
     implementation("org.jetbrains.exposed:exposed-jdbc:$exposedVersion")
     implementation("org.jetbrains.exposed:exposed-java-time:$exposedVersion")
+    implementation("org.jetbrains.exposed:exposed-migration-jdbc:$exposedVersion")
     implementation("org.apache.kafka:kafka-clients:$kafkaVersion")
 
     implementation("com.zaxxer:HikariCP:5.1.0")

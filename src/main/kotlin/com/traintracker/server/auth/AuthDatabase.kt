@@ -3,9 +3,9 @@ package com.traintracker.server.auth
 import java.sql.ResultSet
 import java.util.UUID
 import kotlinx.serialization.Serializable
-import org.jetbrains.exposed.sql.Transaction
-import org.jetbrains.exposed.sql.statements.jdbc.JdbcConnectionImpl
-import org.jetbrains.exposed.sql.transactions.transaction
+import org.jetbrains.exposed.v1.jdbc.JdbcTransaction
+import org.jetbrains.exposed.v1.jdbc.statements.jdbc.JdbcConnectionImpl
+import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 import org.mindrot.jbcrypt.BCrypt
 import org.slf4j.LoggerFactory
 
@@ -360,7 +360,7 @@ object AuthDatabase {
         transaction { execPrepared("UPDATE schedules SET crs = ? WHERE tiploc = ?", safeCrs, safeTiploc) }
     }
 
-    private fun Transaction.execPrepared(sql: String, vararg params: String) {
+    private fun JdbcTransaction.execPrepared(sql: String, vararg params: String) {
         val conn = (connection as JdbcConnectionImpl).connection
         conn.prepareStatement(sql).use { stmt ->
             params.forEachIndexed { i, v -> stmt.setString(i + 1, v) }
@@ -368,7 +368,7 @@ object AuthDatabase {
         }
     }
 
-    private fun Transaction.execQuery(sql: String, vararg params: String, block: (ResultSet) -> Unit) {
+    private fun JdbcTransaction.execQuery(sql: String, vararg params: String, block: (ResultSet) -> Unit) {
         val conn = (connection as JdbcConnectionImpl).connection
         conn.prepareStatement(sql).use { stmt ->
             params.forEachIndexed { i, v -> stmt.setString(i + 1, v) }

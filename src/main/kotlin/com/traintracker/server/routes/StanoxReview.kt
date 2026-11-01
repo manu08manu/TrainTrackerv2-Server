@@ -4,7 +4,7 @@ import com.traintracker.server.auth.AuthDatabase
 import com.traintracker.server.cif.CorpusLookup
 import io.ktor.server.response.respond
 import io.ktor.server.routing.Route
-import org.jetbrains.exposed.sql.transactions.transaction
+import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 import org.slf4j.LoggerFactory
 
 private val srLog = LoggerFactory.getLogger("StanoxReview")

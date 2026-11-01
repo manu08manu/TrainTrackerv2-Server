@@ -2,7 +2,7 @@ package com.traintracker.server.cif
 
 import java.time.LocalDate
 import java.util.concurrent.atomic.AtomicReference
-import org.jetbrains.exposed.sql.transactions.transaction
+import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 import org.json.JSONObject
 import org.slf4j.LoggerFactory
 

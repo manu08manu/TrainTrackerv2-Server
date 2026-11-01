@@ -12,14 +12,14 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.call
 import io.ktor.server.response.respond
 import io.ktor.server.routing.get
-import org.jetbrains.exposed.sql.ResultRow
-import org.jetbrains.exposed.sql.SortOrder
+import org.jetbrains.exposed.v1.core.ResultRow
+import org.jetbrains.exposed.v1.core.SortOrder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
-import org.jetbrains.exposed.sql.and
-import org.jetbrains.exposed.sql.selectAll
-import org.jetbrains.exposed.sql.transactions.transaction
+import org.jetbrains.exposed.v1.core.eq
+import org.jetbrains.exposed.v1.core.and
+import org.jetbrains.exposed.v1.jdbc.selectAll
+import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 import java.time.LocalDateTime
 
 fun Route.serviceDetailRoutes() {
@@ -289,7 +289,7 @@ fun Route.serviceDetailRoutes() {
                             rawCps.none { !it.isCancelled && it.stopType != "LO" }
                         val propagatedCps = if (serviceNeverRan) {
                             rawCps.map { cp ->
-                                if (!cp.isCancelled) cp.copy(isCancelled = true, cancelReason = loCancel!!.cancelReason) else cp
+                                if (!cp.isCancelled) cp.copy(isCancelled = true, cancelReason = loCancel.cancelReason) else cp
                             }
                         } else {
                             rawCps
@@ -457,7 +457,7 @@ fun Route.serviceDetailRoutes() {
             )
         }
         if (annotatedSvc.association.formsUid != null) {
-            val chain = walkFormsChain(annotatedSvc.association.formsUid!!, annotatedSvc.association.formsDate ?: svcDate)
+            val chain = walkFormsChain(annotatedSvc.association.formsUid, annotatedSvc.association.formsDate ?: svcDate)
             chain.firstOrNull()?.let { h ->
                 annotatedSvc = annotatedSvc.copy(
                     association = annotatedSvc.association.copy(formsNextUid = h.uid, formsNextHeadcode = h.headcode, formsNextDate = h.date)
