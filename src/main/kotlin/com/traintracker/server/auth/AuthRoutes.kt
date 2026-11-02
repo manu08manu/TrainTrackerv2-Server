@@ -50,8 +50,8 @@ fun Route.authRoutes() {
         }
         val body = JSONObject(call.receiveText())
         val newPassword = body.optString("password", "")
-        if (newPassword.length < 8) {
-            call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Password (8+ chars) required"))
+        if (newPassword.length !in 8..128) {
+            call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Password (8-128 chars) required"))
             return@post
         }
         AuthDatabase.setUser(email, newPassword)
@@ -67,8 +67,8 @@ fun Route.authRoutes() {
         val body = JSONObject(call.receiveText())
         val email = body.optString("email", "").trim()
         val password = body.optString("password", "")
-        if (email.isEmpty() || password.length < 8) {
-            call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Email and password (8+ chars) required"))
+        if (email.isEmpty() || password.length !in 8..128) {
+            call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Email and password (8-128 chars) required"))
             return@post
         }
         AuthDatabase.setUser(email, password)
@@ -84,8 +84,8 @@ fun Route.authRoutes() {
         val body = JSONObject(call.receiveText())
         val email = body.optString("email", "").trim()
         val password = body.optString("password", "")
-        if (email.isEmpty() || password.length < 8) {
-            call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Email and password (8+ chars) required"))
+        if (email.isEmpty() || password.length !in 8..128) {
+            call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Email and password (8-128 chars) required"))
             return@post
         }
         AuthDatabase.setUser(email, password)

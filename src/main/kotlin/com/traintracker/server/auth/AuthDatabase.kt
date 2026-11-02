@@ -6,7 +6,6 @@ import kotlinx.serialization.Serializable
 import org.jetbrains.exposed.v1.jdbc.JdbcTransaction
 import org.jetbrains.exposed.v1.jdbc.statements.jdbc.JdbcConnectionImpl
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
-import org.mindrot.jbcrypt.BCrypt
 import org.slf4j.LoggerFactory
 
 @Serializable
@@ -47,7 +46,7 @@ object AuthDatabase {
     }
 
     fun setUser(email: String, password: String): Boolean {
-        val hash = BCrypt.hashpw(password, BCrypt.gensalt())
+        val hash = PasswordHasher.hash(password)
         val wasMaster = isMasterAdmin(email)
         return try {
             transaction {
@@ -115,7 +114,15 @@ object AuthDatabase {
             }
         }
         val h = hash ?: return null
-        if (!BCrypt.checkpw(password, h)) return null
+        val result = PasswordHasher.verify(password, h)
+        if (!result.ok) return null
+        if (result.needsRehash) {
+            val upgraded = PasswordHasher.hash(password)
+            transaction {
+                execPrepared("UPDATE admin_users SET password_hash = ? WHERE email = ?", upgraded, email)
+            }
+            log.info("Password hash upgraded")
+        }
         val token = UUID.randomUUID().toString()
         transaction {
             execPrepared("INSERT INTO admin_sessions (token, email, expires_at) VALUES (?, ?, datetime('now', '+7 days'))", token, email)

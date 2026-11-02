@@ -44,7 +44,6 @@ dependencies {
     implementation("com.zaxxer:HikariCP:7.1.0")
     implementation("org.xerial:sqlite-jdbc:3.54.1.0")
     implementation("org.json:json:20260814")
-    implementation("org.mindrot:jbcrypt:0.4")
     implementation("ch.qos.logback:logback-classic:1.6.6")
     implementation("org.slf4j:slf4j-api:2.0.20")
 }
