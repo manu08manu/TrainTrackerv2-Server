@@ -6,3 +6,7 @@ build/
 *.db
 env.conf
 .env
+
+# Runtime logs and generated CIF snapshots
+logs/
+scripts/cif_snapshots/
