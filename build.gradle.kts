@@ -1,7 +1,7 @@
 plugins {
-    kotlin("jvm") version "2.3.21"
-    kotlin("plugin.serialization") version "2.3.21"
-    id("com.gradleup.shadow") version "8.3.6"
+    kotlin("jvm") version "2.4.21"
+    kotlin("plugin.serialization") version "2.4.21"
+    id("com.gradleup.shadow") version "9.6.1"
     application
 }
 
@@ -56,6 +56,19 @@ dependencies {
 tasks.shadowJar {
     archiveFileName.set("traintracker-backend-2.0.0.jar")
     manifest { attributes["Main-Class"] = "com.traintracker.server.ApplicationKt" }
+
+    // Allow the Kotlin metadata transformer to process all matching entries.
+    val transformedPaths = listOf("META-INF/*.kotlin_module")
+
+    filesMatching(transformedPaths) {
+        duplicatesStrategy = org.gradle.api.file.DuplicatesStrategy.INCLUDE
+    }
+
+    // Include this configuration in Gradle's task inputs.
+    inputs.property("transformedPathsDuplicatesStrategy", "$transformedPaths=INCLUDE")
+
+    // Fail if duplicate ZIP entries remain in the resulting JAR.
+    failOnDuplicateEntries.set(true)
 }
 
 tasks.build { dependsOn(tasks.shadowJar) }
