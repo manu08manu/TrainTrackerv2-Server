@@ -15,7 +15,7 @@ val kafkaVersion = "4.4.0"
 repositories { mavenCentral() }
 
 kotlin {
-    jvmToolchain(21)
+    jvmToolchain(25)
 }
 
 application { mainClass.set("com.traintracker.server.ApplicationKt") }
@@ -55,7 +55,10 @@ dependencies {
 
 tasks.shadowJar {
     archiveFileName.set("traintracker-backend-2.0.0.jar")
-    manifest { attributes["Main-Class"] = "com.traintracker.server.ApplicationKt" }
+    manifest {
+        attributes["Main-Class"] = "com.traintracker.server.ApplicationKt"
+        attributes["Enable-Native-Access"] = "ALL-UNNAMED"
+    }
 
     // Allow the Kotlin metadata transformer to process all matching entries.
     val transformedPaths = listOf("META-INF/*.kotlin_module")
