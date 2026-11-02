@@ -8,7 +8,7 @@ plugins {
 group = "com.traintracker"
 version = "2.0.0"
 
-val ktorVersion = "3.1.3"
+val ktorVersion = "3.6.1"
 val exposedVersion = "1.3.1"
 val kafkaVersion = "4.4.0"
 
