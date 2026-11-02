@@ -430,30 +430,10 @@ object AppDatabase {
 
 
     fun init() {
-        dataSource = if (Config.useOracle) buildOraclePool() else buildSqlitePool()
+        dataSource = buildSqlitePool()
         Database.connect(dataSource)
         createTables()
-        log.info("Database ready (${if (Config.useOracle) "Oracle" else "SQLite"})")
-    }
-
-    private fun buildOraclePool(): HikariDataSource {
-        Config.oracleWalletDir?.let {
-            System.setProperty("oracle.net.wallet_location", it)
-            System.setProperty("oracle.net.tns_admin", it)
-        }
-        val config = HikariConfig().apply {
-            jdbcUrl = Config.oracleDbUrl!!
-            username = Config.oracleDbUser!!
-            password = Config.oracleDbPassword!!
-            driverClassName = "oracle.jdbc.OracleDriver"
-            maximumPoolSize = 5
-            minimumIdle = 2
-            connectionTimeout = 30000L
-            idleTimeout = 600000L
-            maxLifetime = 1800000L
-            connectionTestQuery = "SELECT 1 FROM DUAL"
-        }
-        return HikariDataSource(config)
+        log.info("Database ready (SQLite)")
     }
 
     private fun buildSqlitePool(): HikariDataSource {
