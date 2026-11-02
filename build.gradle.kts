@@ -42,10 +42,6 @@ dependencies {
     implementation("org.apache.kafka:kafka-clients:$kafkaVersion")
 
     implementation("com.zaxxer:HikariCP:7.1.0")
-    // Oracle JDBC + UCP (listed before sqlite-jdbc: first META-INF/services/java.sql.Driver wins, as in the live jar), bundled in the live jar (oracle/jdbc/driver/BuildInfo: 23.3.0.23.09, javac 11).
-    // Needed when ORACLE_DB_URL is set (AppDatabase.buildOraclePool loads oracle.jdbc.OracleDriver by name).
-    implementation("com.oracle.database.jdbc:ojdbc11:23.3.0.23.09")
-    implementation("com.oracle.database.jdbc:ucp:23.3.0.23.09")
     implementation("org.xerial:sqlite-jdbc:3.54.1.0")
     implementation("org.json:json:20260814")
     implementation("org.mindrot:jbcrypt:0.4")

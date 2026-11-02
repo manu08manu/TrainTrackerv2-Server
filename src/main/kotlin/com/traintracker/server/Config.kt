@@ -19,11 +19,6 @@ object Config {
     val scheduleUsername: String = env("SCHEDULE_USERNAME")
     val schedulePassword: String = env("SCHEDULE_PASSWORD")
 
-    val oracleDbUrl: String? = System.getenv("ORACLE_DB_URL")
-    val oracleDbUser: String? = System.getenv("ORACLE_DB_USER")
-    val oracleDbPassword: String? = System.getenv("ORACLE_DB_PASSWORD")
-    val oracleWalletDir: String? = System.getenv("ORACLE_WALLET_DIR")
-    val useOracle: Boolean get() = oracleDbUrl != null
 
     val sqlitePath: String = System.getenv("SQLITE_PATH") ?: "./traintracker.db"
 
