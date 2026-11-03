@@ -67,6 +67,17 @@ tasks.shadowJar {
 
     // Fail if duplicate ZIP entries remain in the resulting JAR.
     failOnDuplicateEntries.set(true)
+
+    // Native libraries for platforms this server never runs on (it is Linux/aarch64).
+    // All Linux variants are kept on purpose, so moving architecture cannot break startup.
+    exclude("org/sqlite/native/Mac/**", "org/sqlite/native/Windows/**", "org/sqlite/native/FreeBSD/**")
+    exclude("org/xerial/snappy/native/Mac/**", "org/xerial/snappy/native/Windows/**")
+    exclude("org/xerial/snappy/native/FreeBSD/**", "org/xerial/snappy/native/SunOS/**", "org/xerial/snappy/native/AIX/**")
+    exclude("aix/**", "darwin/**", "freebsd/**", "win/**")
+    exclude("net/jpountz/util/darwin/**", "net/jpountz/util/windows/**")
+    exclude("org/fusesource/jansi/internal/native/Mac/**", "org/fusesource/jansi/internal/native/Windows/**")
+    exclude("org/fusesource/jansi/internal/native/FreeBSD/**")
+    exclude("META-INF/native/*osx*", "META-INF/native/*windows*")
 }
 
 tasks.build { dependsOn(tasks.shadowJar) }
