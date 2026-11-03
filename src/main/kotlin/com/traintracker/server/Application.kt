@@ -37,6 +37,7 @@ import io.ktor.server.plugins.cors.routing.CORS
 import io.ktor.server.plugins.statuspages.StatusPages
 import io.ktor.server.request.path
 import io.ktor.server.response.respond
+import io.ktor.server.routing.IgnoreTrailingSlash
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -64,6 +65,8 @@ fun main() {
 }
 
 private fun Application.configure() {
+    install(IgnoreTrailingSlash)
+
     install(ContentNegotiation) {
         json(Json {
             prettyPrint = false
