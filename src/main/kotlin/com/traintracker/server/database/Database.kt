@@ -438,11 +438,11 @@ object AppDatabase {
 
     private fun buildSqlitePool(): HikariDataSource {
         val config = HikariConfig().apply {
-            jdbcUrl = "jdbc:sqlite:${Config.sqlitePath}"
+            jdbcUrl =
+                "jdbc:sqlite:${Config.sqlitePath}?busy_timeout=5000&journal_mode=WAL&synchronous=FULL&cache_size=-32768&temp_store=MEMORY&mmap_size=268435456&journal_size_limit=67108864"
+
             driverClassName = "org.sqlite.JDBC"
             maximumPoolSize = 10
-            connectionInitSql =
-                "PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-32768; PRAGMA temp_store=MEMORY; PRAGMA mmap_size=268435456; PRAGMA journal_size_limit=67108864;"
         }
         return HikariDataSource(config)
     }
