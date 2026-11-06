@@ -57,19 +57,12 @@ object CifParser {
     private val debugLoggedOnce = AtomicBoolean(false)
 
     private data class TiplocData(
-        val tiplocToCrs: Map<String, String>,
-        val stanoxToCrs: Map<String, String>,
-        val stanoxToTiploc: Map<String, String>,
-        val tiplocToCifName: Map<String, String>,
+        val allTiplocs: Set<String>,
         val assocLines: List<String>
     )
 
     private fun collectTiplocs(gzipFile: File): TiplocData {
-        val feedTiplocs = HashMap<String, String>(8000)
-        val feedStanox = HashMap<String, String>(8000)
-        val feedStanoxTiploc = HashMap<String, String>(8000)
-        val ambiguousStanox = HashSet<String>()
-        val feedTiplocNames = HashMap<String, String>(12000)
+        val allTiplocs = HashSet<String>(16000)
         val assocLines = mutableListOf<String>()
         GZIPInputStream(FileInputStream(gzipFile)).use { gis ->
             BufferedReader(InputStreamReader(gis, Charsets.UTF_8)).use { reader ->
@@ -81,20 +74,7 @@ object CifParser {
                             val obj = JSONObject(trimmed).optJSONObject("TiplocV1")
                             if (obj != null) {
                                 val tiplocCode = obj.optString("tiploc_code", "").trim()
-                                val crs = obj.optString("crs_code", "").trim().ifEmpty { obj.optString("CRS", "").trim() }
-                                val stanox = obj.optString("stanox", "").trim()
-                                val tpsDesc = obj.optString("tps_description", "").trim()
-                                if (tiplocCode.isNotEmpty() && crs.isNotEmpty()) feedTiplocs[tiplocCode] = crs
-                                if (stanox.isNotEmpty() && crs.isNotEmpty()) feedStanox[stanox] = crs
-                                if (stanox.isNotEmpty() && tiplocCode.isNotEmpty()) {
-                                    val existing = feedStanoxTiploc[stanox]
-                                    if (existing == null) {
-                                        feedStanoxTiploc[stanox] = tiplocCode
-                                    } else if (existing != tiplocCode) {
-                                        ambiguousStanox.add(stanox)
-                                    }
-                                }
-                                if (tiplocCode.isNotEmpty() && tpsDesc.isNotEmpty()) feedTiplocNames[tiplocCode] = tpsDesc
+                                if (tiplocCode.isNotEmpty()) allTiplocs.add(tiplocCode)
                             }
                         } catch (e: Exception) {
                         }
@@ -105,19 +85,13 @@ object CifParser {
                 }
             }
         }
-        ambiguousStanox.forEach { feedStanoxTiploc.remove(it) }
-        return TiplocData(feedTiplocs, feedStanox, feedStanoxTiploc, feedTiplocNames, assocLines)
+        return TiplocData(allTiplocs, assocLines)
     }
 
     fun parseAndPersist(gzipFile: File): Int {
         val tiplocData = collectTiplocs(gzipFile)
         ScheduleCancellations.begin()
-        CorpusLookup.mergeFromFeed(tiplocData.tiplocToCrs)
-        CorpusLookup.mergeStanoxFromFeed(tiplocData.stanoxToCrs)
-        AppDatabase.saveStanoxMap(tiplocData.stanoxToCrs)
-        CorpusLookup.mergeStanoxToTiplocFromFeed(tiplocData.stanoxToTiploc)
-        AppDatabase.saveStanoxTiplocMap(tiplocData.stanoxToTiploc)
-        CorpusLookup.mergeCifNamesFromFeed(tiplocData.tiplocToCifName)
+        LocationData.onCif(tiplocData.allTiplocs)
         val today = LocalDate.now()
         val todayDow = today.dayOfWeek
         val buffer = mutableListOf<CifStop>()

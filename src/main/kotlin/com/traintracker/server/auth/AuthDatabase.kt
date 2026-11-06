@@ -313,21 +313,6 @@ object AuthDatabase {
         setLocationOverride("crs", tiploc, crs, changedBy)
     }
 
-    fun setStanoxOverride(tiploc: String, stanox: String, changedBy: String) {
-        setLocationOverride("stanox", tiploc, stanox, changedBy)
-    }
-
-    fun stanoxConflicts(stanox: String, tiploc: String): List<String> {
-        if (!stanox.matches(Regex("\\d{5}"))) return emptyList()
-        val out = mutableListOf<String>()
-        transaction {
-            exec("SELECT tiploc, crs FROM location_overrides WHERE stanox = '$stanox' AND tiploc != '${tiploc.replace("'", "''")}'") { rs ->
-                while (rs.next()) out.add("${rs.getString(1)}=${rs.getString(2) ?: ""}")
-            }
-        }
-        return out
-    }
-
     private fun setLocationOverride(col: String, tiploc: String, value: String, changedBy: String) {
         setOverride("location_overrides", "tiploc", col, tiploc, value, changedBy)
         transaction {
@@ -358,6 +343,24 @@ object AuthDatabase {
 
     fun setNameOverride(tiploc: String, name: String, changedBy: String) {
         setLocationOverride("name", tiploc, name, changedBy)
+    }
+
+    /** Set STANOX only when the current value is empty. Returns the resulting (existing or new) value. */
+    fun setStanoxOverrideIfEmpty(tiploc: String, stanox: String, changedBy: String): String? {
+        var current: String? = null
+        transaction {
+            execQuery("SELECT stanox FROM location_overrides WHERE tiploc = ?", tiploc) { rs ->
+                if (rs.next()) current = rs.getString(1)?.takeIf { it.isNotEmpty() }
+            }
+            if (current == null) {
+                execPrepared(
+                    "UPDATE location_overrides SET stanox = ?, changed_by = ?, changed_at = datetime('now') WHERE tiploc = ?",
+                    stanox, changedBy, tiploc
+                )
+                current = stanox
+            }
+        }
+        return current
     }
 
     fun updateSchedulesCrs(tiploc: String, crs: String) {

@@ -1,47 +1,32 @@
 package com.traintracker.server.cif
 
-import com.traintracker.server.Config
-import com.traintracker.server.database.AppDatabase
-import io.ktor.client.HttpClient
-import io.ktor.client.engine.cio.CIO
-import io.ktor.client.plugins.HttpRedirect
-import io.ktor.client.request.get
-import io.ktor.client.request.header
-import io.ktor.client.statement.bodyAsChannel
-import io.ktor.http.isSuccess
-import io.ktor.utils.io.readAvailable
+import com.traintracker.server.rdm.RdmFeed
+import com.traintracker.server.rdm.RdmFiles
+import com.traintracker.server.rdm.RdmWatcher
 import java.io.File
-import java.io.FileInputStream
-import java.io.FileOutputStream
-import java.nio.file.Files
-import java.nio.file.StandardCopyOption
 import java.time.LocalDate
-import java.time.LocalTime
 import java.time.format.DateTimeFormatter
-import java.util.Base64
-import java.util.concurrent.CancellationException
-import java.util.zip.GZIPInputStream
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
-import org.json.JSONObject
 import org.slf4j.LoggerFactory
 
 private val log = LoggerFactory.getLogger("SmartLookup")
 
 data class SmartEntry(
     val td: String,
+    val stepType: String,
     val fromBerth: String,
     val toBerth: String,
     val stanox: String,
+    val stanme: String,
     val event: String,
     val platform: String,
-    val stepType: String,
-    val offsetSec: Int?
+    val toLine: String,
+    val offsetSec: Int?,
+    val route: String,
+    val fromLine: String,
+    val comment: String
 )
 
 class SmartMatch(val kind: Int, val entries: List<SmartEntry>)
@@ -50,9 +35,6 @@ object SmartLookup {
     const val KIND_EXACT = 1
     const val KIND_FROM = 2
     const val KIND_TO = 3
-    private const val URL = "https://publicdatafeeds.networkrail.co.uk/ntrod/SupportingFileAuthenticate?type=SMART"
-    private const val META_KEY = "smart_last_download_date"
-    private val cacheFile = File("/opt/traintracker/smart_cache.json.gz")
     @Volatile
     private var index: Map<String, List<SmartEntry>> = emptyMap()
     @Volatile
@@ -72,10 +54,6 @@ object SmartLookup {
     @Volatile
     private var tableReady = false
     private val dbLock = Any()
-    private val http = HttpClient(CIO) {
-        install(HttpRedirect) { checkHttpMethod = false }
-        engine { requestTimeout = 0L }
-    }
 
     fun keyCount(): Int = index.size
 
@@ -117,88 +95,33 @@ object SmartLookup {
         return null
     }
 
-    fun start(scope: CoroutineScope): Job = scope.launch(Dispatchers.IO) {
-        if (cacheFile.exists()) {
-            try {
-                install(parseEntries(cacheFile), "cache")
-            } catch (e: Exception) {
-                log.warn("SMART cache unreadable: ${e.message}")
+    fun start(scope: CoroutineScope): Job {
+        RdmWatcher.register(
+            RdmFeed("smart-berths", RdmFiles.ofType("berth-steps-.csv"), tick = { ensureDbSynced() }) { file, isNew ->
+                loadFromFile(file, isNew)
             }
-        }
-        try {
-            refresh(index.isEmpty())
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            log.error("SMART download failed on startup: ${e.message}")
-        }
-        ensureDbSynced()
-        while (isActive) {
-            delay(3600000L)
-            ensureDbSynced()
-            try {
-                refresh(false)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                log.warn("SMART refresh failed: ${e.message}")
-            }
-        }
+        )
+        return RdmWatcher.ensureStarted(scope)
     }
 
-    private suspend fun refresh(force: Boolean) {
-        val today = LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE)
-        val last = AppDatabase.getCifMeta(META_KEY)
-        val due = force || (last != today && LocalTime.now().hour >= 3)
-        if (!due) return
-        log.info("Downloading SMART extract (last=$last)")
-        val tmp = File("${cacheFile.path}.tmp")
-        download(tmp)
-        val entries = parseEntries(tmp)
-        if (entries.isEmpty()) {
-            tmp.delete()
-            error("SMART download parsed to zero entries")
-        }
-        Files.move(tmp.toPath(), cacheFile.toPath(), StandardCopyOption.REPLACE_EXISTING)
-        install(entries, "download")
-        AppDatabase.setCifMeta(META_KEY, today)
+    private fun loadFromFile(file: File, isNew: Boolean) {
+        val entries = parseCsv(file)
+        if (entries.isEmpty()) error("SMART CSV parsed to zero entries: ${file.name}")
+        install(entries, isNew)
     }
 
-    private suspend fun download(dest: File) {
-        val creds = Base64.getEncoder().encodeToString("${Config.scheduleUsername}:${Config.schedulePassword}".toByteArray())
-        val response = http.get(URL) {
-            header("Authorization", "Basic $creds")
-        }
-        if (!response.status.isSuccess()) error("SMART download failed: HTTP ${response.status}")
-        val channel = response.bodyAsChannel()
-        FileOutputStream(dest).buffered().use { out ->
-            val buffer = ByteArray(65536)
-            while (true) {
-                val n = channel.readAvailable(buffer)
-                if (n == -1) break
-                if (n > 0) out.write(buffer, 0, n)
-            }
-        }
-    }
-
-    private fun parseEntries(file: File): List<SmartEntry> {
-        val text = GZIPInputStream(FileInputStream(file).buffered()).use { String(it.readBytes(), Charsets.UTF_8) }
-        val arr = JSONObject(text).getJSONArray("BERTHDATA")
-        val out = ArrayList<SmartEntry>(arr.length())
-        for (i in 0 until arr.length()) {
-            val o = arr.getJSONObject(i)
-            val td = o.optString("TD", "").trim()
-            val from = o.optString("FROMBERTH", "").trim()
-            val to = o.optString("TOBERTH", "").trim()
-            val stanox = o.optString("STANOX", "").trim()
-            if (td.isEmpty() || stanox.isEmpty() || (from.isEmpty() && to.isEmpty())) continue
+    private fun parseCsv(f: File): List<SmartEntry> {
+        val out = ArrayList<SmartEntry>()
+        for (r in RdmFiles.readCsv(f)) {
+            if (r.size < 12) continue
+            fun g(i: Int) = if (i < r.size) r[i].trim() else ""
+            val td = g(0)
+            if (td.isEmpty() || g(1).equals("STEPTYPE", ignoreCase = true)) continue
             out.add(
                 SmartEntry(
-                    td, from, to, stanox,
-                    o.optString("EVENT", "").trim(),
-                    o.optString("PLATFORM", "").trim(),
-                    o.optString("STEPTYPE", "").trim(),
-                    o.optString("BERTHOFFSET", "").trim().toIntOrNull()
+                    stepType = g(1), fromBerth = g(2), toBerth = g(3), stanox = g(4), stanme = g(5),
+                    event = g(6), platform = g(7), toLine = g(8), offsetSec = g(9).toIntOrNull(),
+                    route = g(10), fromLine = g(11), td = td, comment = g(12)
                 )
             )
         }
@@ -236,7 +159,7 @@ object SmartLookup {
         return map
     }
 
-    private fun install(entries: List<SmartEntry>, source: String) {
+    private fun install(entries: List<SmartEntry>, isNew: Boolean) {
         val parsed = buildIndex(entries, "SMART")
         val a = HashSet<String>()
         for (e in entries) a.add(e.td)
@@ -244,26 +167,24 @@ object SmartLookup {
         smartCoverage = buildCoverage(parsed)
         smartEntries = entries
         index = parsed
-        log.info("SMART loaded from $source: ${parsed.size} keys, ${a.size} TD areas")
-        syncFromSmart(entries, source == "download")
+        log.info("SMART index built: ${parsed.size} keys, ${a.size} TD areas")
+        syncFromSmart(entries, isNew)
         reloadOverrides()
     }
 
     private fun sq(s: String): String = s.replace("'", "''")
 
-    private fun primaryKey(e: SmartEntry): String = "${e.td}|${e.fromBerth}|${e.toBerth}"
-
-    private fun rowKey(e: SmartEntry): String = "${e.td}|${e.fromBerth}|${e.toBerth}|${e.stanox}|${e.event}"
+    private fun rowKey(e: SmartEntry): String = "${e.td}|${e.fromBerth}|${e.toBerth}|${e.stanox}|${e.event}|${e.toLine}|${e.fromLine}|${e.route}|${e.stepType}"
 
     private fun sig(e: SmartEntry): String =
-        "${e.td}|${e.fromBerth}|${e.toBerth}|${e.stanox}|${e.event}|${e.platform}|${e.stepType}|${e.offsetSec?.toString() ?: ""}"
+        "${rowKey(e)}|${e.platform}|${e.stepType}|${e.offsetSec?.toString() ?: ""}|${e.comment}|${e.stanme}"
 
     fun ensureTable() {
         if (tableReady) return
         transaction {
-            exec("CREATE TABLE IF NOT EXISTS smart_berths (id INTEGER PRIMARY KEY AUTOINCREMENT, td TEXT NOT NULL, from_berth TEXT NOT NULL DEFAULT '', to_berth TEXT NOT NULL DEFAULT '', stanox TEXT NOT NULL, event TEXT NOT NULL DEFAULT '', platform TEXT NOT NULL DEFAULT '', step_type TEXT NOT NULL DEFAULT '', offset_sec INTEGER, source TEXT NOT NULL DEFAULT '', changed_by TEXT, changed_at TEXT DEFAULT (datetime('now')))")
+            exec("CREATE TABLE IF NOT EXISTS smart_berths (id INTEGER PRIMARY KEY AUTOINCREMENT, TD TEXT NOT NULL DEFAULT '', StepType TEXT NOT NULL DEFAULT '', FromBerth TEXT NOT NULL DEFAULT '', ToBerth TEXT NOT NULL DEFAULT '', Stanox TEXT NOT NULL DEFAULT '', Stanme TEXT NOT NULL DEFAULT '', Event TEXT NOT NULL DEFAULT '', Platform TEXT NOT NULL DEFAULT '', ToLine TEXT NOT NULL DEFAULT '', BerthOffset INTEGER, Route TEXT NOT NULL DEFAULT '', FromLine TEXT NOT NULL DEFAULT '', Comment TEXT NOT NULL DEFAULT '', Source TEXT NOT NULL DEFAULT '', ChangedBy TEXT, ChangedAt TEXT DEFAULT (datetime('now')))")
             exec("CREATE INDEX IF NOT EXISTS idx_smart_berths_stanox ON smart_berths(stanox)")
-            exec("CREATE INDEX IF NOT EXISTS idx_smart_berths_key ON smart_berths(td, from_berth, to_berth)")
+            exec("CREATE INDEX IF NOT EXISTS idx_smart_berths_key ON smart_berths(TD, FromBerth, ToBerth)")
         }
         tableReady = true
     }
@@ -271,20 +192,25 @@ object SmartLookup {
     private fun loadDbEntries(): List<SmartEntry> {
         val out = ArrayList<SmartEntry>()
         transaction {
-            exec("SELECT td, from_berth, to_berth, stanox, event, platform, step_type, offset_sec FROM smart_berths ORDER BY id") { rs ->
+            exec("SELECT TD, StepType, FromBerth, ToBerth, Stanox, Stanme, Event, Platform, ToLine, BerthOffset, Route, FromLine, Comment FROM smart_berths ORDER BY id") { rs ->
                 while (rs.next()) {
-                    val off = rs.getInt(8)
+                    val off = rs.getInt(10)
                     val offNull = rs.wasNull()
                     out.add(
                         SmartEntry(
-                            rs.getString(1) ?: "",
-                            rs.getString(2) ?: "",
-                            rs.getString(3) ?: "",
-                            rs.getString(4) ?: "",
-                            rs.getString(5) ?: "",
-                            rs.getString(6) ?: "",
-                            rs.getString(7) ?: "",
-                            if (offNull) null else off
+                            td = rs.getString(1) ?: "",
+                            stepType = rs.getString(2) ?: "",
+                            fromBerth = rs.getString(3) ?: "",
+                            toBerth = rs.getString(4) ?: "",
+                            stanox = rs.getString(5) ?: "",
+                            stanme = rs.getString(6) ?: "",
+                            event = rs.getString(7) ?: "",
+                            platform = rs.getString(8) ?: "",
+                            toLine = rs.getString(9) ?: "",
+                            offsetSec = if (offNull) null else off,
+                            route = rs.getString(11) ?: "",
+                            fromLine = rs.getString(12) ?: "",
+                            comment = rs.getString(13) ?: ""
                         )
                     )
                 }
@@ -320,16 +246,16 @@ object SmartLookup {
             }
             for (chunk in toInsert.chunked(400)) {
                 val values = chunk.joinToString(",") { e ->
-                    "('${sq(e.td)}','${sq(e.fromBerth)}','${sq(e.toBerth)}','${sq(e.stanox)}','${sq(e.event)}','${sq(e.platform)}','${sq(e.stepType)}',${e.offsetSec?.toString() ?: "NULL"},'$tag')"
+                    "('${sq(e.td)}','${sq(e.stepType)}','${sq(e.fromBerth)}','${sq(e.toBerth)}','${sq(e.stanox)}','${sq(e.stanme)}','${sq(e.event)}','${sq(e.platform)}','${sq(e.toLine)}',${e.offsetSec?.toString() ?: "NULL"},'${sq(e.route)}','${sq(e.fromLine)}','${sq(e.comment)}','$tag')"
                 }
                 transaction {
-                    exec("INSERT INTO smart_berths (td, from_berth, to_berth, stanox, event, platform, step_type, offset_sec, source) VALUES $values")
+                    exec("INSERT INTO smart_berths (TD, StepType, FromBerth, ToBerth, Stanox, Stanme, Event, Platform, ToLine, BerthOffset, Route, FromLine, Comment, Source) VALUES $values")
                 }
             }
             for (chunk in toUpdate.chunked(200)) {
                 transaction {
                     for (e in chunk) {
-                        exec("UPDATE smart_berths SET platform = '${sq(e.platform)}', step_type = '${sq(e.stepType)}', offset_sec = ${e.offsetSec?.toString() ?: "NULL"}, source = '$changedTag', changed_by = NULL, changed_at = datetime('now') WHERE td = '${sq(e.td)}' AND from_berth = '${sq(e.fromBerth)}' AND to_berth = '${sq(e.toBerth)}' AND stanox = '${sq(e.stanox)}' AND event = '${sq(e.event)}'")
+                        exec("UPDATE smart_berths SET platform = '${sq(e.platform)}', StepType = '${sq(e.stepType)}', BerthOffset = ${e.offsetSec?.toString() ?: "NULL"}, Comment = '${sq(e.comment)}', Stanme = '${sq(e.stanme)}', Source = '$changedTag', ChangedBy = NULL, ChangedAt = datetime('now') WHERE td = '${sq(e.td)}' AND FromBerth = '${sq(e.fromBerth)}' AND ToBerth = '${sq(e.toBerth)}' AND Stanox = '${sq(e.stanox)}' AND Event = '${sq(e.event)}' AND ToLine = '${sq(e.toLine)}' AND FromLine = '${sq(e.fromLine)}' AND Route = '${sq(e.route)}' AND StepType = '${sq(e.stepType)}'")
                     }
                 }
             }
@@ -377,8 +303,8 @@ object SmartLookup {
             val where = ArrayList<String>()
             if (sx.isNotEmpty()) where.add("stanox = '$sx'")
             if (t.isNotEmpty()) where.add("td = '$t'")
-            if (b.isNotEmpty()) where.add("(from_berth = '$b' OR to_berth = '$b')")
-            val sql = "SELECT id, td, from_berth, to_berth, stanox, event, platform, step_type, offset_sec, source, changed_by, changed_at FROM smart_berths${if (where.isEmpty()) "" else " WHERE ${where.joinToString(" AND ")}"} ORDER BY td, from_berth, to_berth LIMIT ${limit.coerceIn(1, 500)}"
+            if (b.isNotEmpty()) where.add("(FromBerth = '$b' OR ToBerth = '$b')")
+            val sql = "SELECT id, TD, StepType, FromBerth, ToBerth, Stanox, Stanme, Event, Platform, ToLine, BerthOffset, Route, FromLine, Comment, Source, ChangedBy, ChangedAt FROM smart_berths${if (where.isEmpty()) "" else " WHERE ${where.joinToString(" AND ")}"} ORDER BY TD, FromBerth, ToBerth LIMIT ${limit.coerceIn(1, 500)}"
             transaction {
                 exec(sql) { rs ->
                     while (rs.next()) {
@@ -386,16 +312,21 @@ object SmartLookup {
                             mapOf(
                                 "id" to (rs.getString(1) ?: ""),
                                 "td" to (rs.getString(2) ?: ""),
-                                "fromBerth" to (rs.getString(3) ?: ""),
-                                "toBerth" to (rs.getString(4) ?: ""),
-                                "stanox" to (rs.getString(5) ?: ""),
-                                "event" to (rs.getString(6) ?: ""),
-                                "platform" to (rs.getString(7) ?: ""),
-                                "stepType" to (rs.getString(8) ?: ""),
-                                "offsetSec" to (rs.getString(9) ?: ""),
-                                "source" to (rs.getString(10) ?: ""),
-                                "changedBy" to (rs.getString(11) ?: ""),
-                                "changedAt" to (rs.getString(12) ?: "")
+                                "stepType" to (rs.getString(3) ?: ""),
+                                "fromBerth" to (rs.getString(4) ?: ""),
+                                "toBerth" to (rs.getString(5) ?: ""),
+                                "stanox" to (rs.getString(6) ?: ""),
+                                "stanme" to (rs.getString(7) ?: ""),
+                                "event" to (rs.getString(8) ?: ""),
+                                "platform" to (rs.getString(9) ?: ""),
+                                "toLine" to (rs.getString(10) ?: ""),
+                                "offsetSec" to (rs.getString(11) ?: ""),
+                                "route" to (rs.getString(12) ?: ""),
+                                "fromLine" to (rs.getString(13) ?: ""),
+                                "comment" to (rs.getString(14) ?: ""),
+                                "source" to (rs.getString(15) ?: ""),
+                                "changedBy" to (rs.getString(16) ?: ""),
+                                "changedAt" to (rs.getString(17) ?: "")
                             )
                         )
                     }
@@ -436,7 +367,7 @@ object SmartLookup {
         try {
             ensureTable()
             transaction {
-                exec("INSERT INTO smart_berths (td, from_berth, to_berth, stanox, event, platform, step_type, offset_sec, source, changed_by) VALUES ('$t','$f','$o','$sx','$ev','${sq(pl)}','${sq(st)}',$offsetSec,'manual','${sq(changedBy)}')")
+                exec("INSERT INTO smart_berths (TD, StepType, FromBerth, ToBerth, Stanox, Event, Platform, BerthOffset, Source, ChangedBy) VALUES ('$t','${sq(st)}','$f','$o','$sx','$ev','${sq(pl)}',$offsetSec,'manual','${sq(changedBy)}')")
             }
         } catch (e: Exception) {
             return "database error: ${e.message}"

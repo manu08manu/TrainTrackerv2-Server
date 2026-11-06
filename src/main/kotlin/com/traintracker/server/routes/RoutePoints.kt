@@ -65,7 +65,8 @@ object RoutePoints {
             }
             val stanoxByTiploc = HashMap<String, String>()
             transaction {
-                exec("SELECT tiploc, stanox FROM location_overrides WHERE tiploc IN (${inList(cps.map { it.tiploc })}) AND stanox IS NOT NULL AND stanox != ''") { rs ->
+                val il = inList(cps.map { it.tiploc })
+                exec("SELECT tiploc, stanox, 0 AS p FROM location_overrides WHERE tiploc IN ($il) AND stanox IS NOT NULL AND stanox != '' UNION ALL SELECT tiploc, stanox, 2 FROM pif_loc WHERE tiploc IN ($il) AND stanox IS NOT NULL AND stanox != '' UNION ALL SELECT tiploc, stanox, 1 FROM nlc_loc WHERE tiploc IN ($il) AND stanox IS NOT NULL AND stanox != '' ORDER BY p") { rs ->
                     while (rs.next()) {
                         val tl = rs.getString(1)
                         val sx = rs.getString(2)
@@ -89,7 +90,8 @@ object RoutePoints {
             val stanoxes = learned.map { it.stanox }
             val info = HashMap<String, Info>()
             transaction {
-                exec("SELECT stanox, tiploc, name FROM location_overrides WHERE stanox IN (${inList(stanoxes)})") { rs ->
+                val ils = inList(stanoxes)
+                exec("SELECT stanox, tiploc, name FROM (SELECT stanox, tiploc, name, 0 AS p FROM location_overrides WHERE stanox IN ($ils) UNION ALL SELECT stanox, tiploc, name, 1 FROM pif_loc WHERE stanox IN ($ils) UNION ALL SELECT stanox, tiploc, description, 2 FROM nlc_loc WHERE stanox IN ($ils)) ORDER BY p, LENGTH(name), tiploc") { rs ->
                     while (rs.next()) {
                         val sx = rs.getString(1)
                         val tl = rs.getString(2)
@@ -190,7 +192,7 @@ object RoutePoints {
     private fun stanoxesOfUid(u: String): Set<String> {
         val r = HashSet<String>()
         transaction {
-            exec("SELECT DISTINCT lo.stanox FROM schedules s JOIN location_overrides lo ON lo.tiploc = s.tiploc WHERE s.uid='${clean(u)}' AND lo.stanox IS NOT NULL AND lo.stanox != ''") { rs ->
+            exec("SELECT DISTINCT lo.stanox FROM schedules s JOIN (SELECT tiploc, stanox FROM location_overrides UNION ALL SELECT tiploc, stanox FROM pif_loc WHERE tiploc NOT IN (SELECT tiploc FROM location_overrides WHERE stanox IS NOT NULL AND stanox != '') UNION ALL SELECT tiploc, stanox FROM nlc_loc WHERE tiploc NOT IN (SELECT tiploc FROM location_overrides WHERE stanox IS NOT NULL AND stanox != '')) lo ON lo.tiploc = s.tiploc WHERE s.uid='${clean(u)}' AND lo.stanox IS NOT NULL AND lo.stanox != ''") { rs ->
                 while (rs.next()) {
                     val x = rs.getString(1)
                     if (x != null) r.add(x)

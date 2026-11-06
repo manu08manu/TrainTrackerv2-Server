@@ -2,6 +2,7 @@ package com.traintracker.server.routes
 
 import com.traintracker.server.auth.AuthDatabase
 import com.traintracker.server.cif.CorpusLookup
+import com.traintracker.server.cif.LocationData
 import com.traintracker.server.database.AppDatabase
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.request.receiveText
@@ -59,32 +60,12 @@ fun Route.adminRoutes() {
         }
         val oldName = CorpusLookup.nameFromTiploc(tiploc)
         val editor = changedBy()
-        val stanoxBefore = StanoxReview.currentStanox(tiploc)
         CorpusLookup.updateTiplocName(tiploc, name, editor)
         AuthDatabase.logTiplocChange(tiploc, oldName, name, editor)
         AppDatabase.deleteMissingTiploc(tiploc)
-        val stanox = StanoxReview.fillOnNaming(tiploc, editor, stanoxBefore)
-        respondOk("tiploc" to tiploc, "name" to name, "stanox" to stanox)
-    }
-    adminPost("/admin/tiploc-stanox") {
-        val tiploc = param("tiploc", true)
-        val stanox = param("stanox")
-        if (tiploc.isEmpty() || !stanox.matches(Regex("\\d{5}"))) {
-            badRequest("tiploc and a 5-digit stanox required")
-            return@adminPost
-        }
-        val editor = changedBy()
-        val shared = AuthDatabase.stanoxConflicts(stanox, tiploc)
-        AuthDatabase.setStanoxOverride(tiploc, stanox, editor)
-        CorpusLookup.reloadStanoxOverrides()
-        respond(
-            buildJsonObject {
-                put("status", "ok")
-                put("tiploc", tiploc)
-                put("stanox", stanox)
-                put("sharedWith", shared.joinToString(", "))
-            }
-        )
+        val autoStanox = LocationData.stanoxForTiploc(tiploc)
+        val effectiveStanox = autoStanox?.let { AuthDatabase.setStanoxOverrideIfEmpty(tiploc, it, editor) } ?: ""
+        respondOk("tiploc" to tiploc, "name" to name, "stanox" to effectiveStanox)
     }
     adminPost("/admin/tsc-operator") {
         val tsc = param("tsc", true)
