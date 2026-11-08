@@ -268,7 +268,7 @@ object CorpusLookup {
                             val crs = rs.getString("crs") ?: continue
                             val tiploc = rs.getString("tiploc") ?: continue
                             if (crsToName.containsKey(crs)) continue
-                            val name = tiplocToName[tiploc]
+                            val name = nameFromTiploc(tiploc)
                             if (!name.isNullOrEmpty() && !name.startsWith(".")) crsToName[crs] = name
                         }
                     }
@@ -278,7 +278,7 @@ object CorpusLookup {
             }
             for ((tiploc, crs) in tiplocToCrs) {
                 if (crsToName.containsKey(crs)) continue
-                val name = tiplocToName[tiploc] ?: continue
+                val name = nameFromTiploc(tiploc) ?: continue
                 if (name.startsWith(".")) continue
                 crsToName[crs] = name
             }

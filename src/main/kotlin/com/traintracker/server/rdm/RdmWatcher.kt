@@ -77,6 +77,8 @@ class RdmFeed(
     val name: String,
     val matches: (String) -> Boolean,
     private val tick: () -> Unit = {},
+    /** Optional: chooses the file to load from this feed's matching files (default: newest by name digits). */
+    val pick: ((List<File>) -> File?)? = null,
     private val load: (file: File, isNew: Boolean) -> Unit
 ) {
     private val log = LoggerFactory.getLogger("RdmFeed-$name")
@@ -120,7 +122,8 @@ object RdmWatcher {
                 val files = RdmFiles.list()   // one directory listing per pass
                 for (feed in feeds) {
                     try {
-                        feed.refresh(RdmFiles.newest(files, feed.matches))
+                        val chosen = feed.pick?.let { pk -> pk(files.filter { f -> feed.matches(f.name) }) }
+                        feed.refresh(if (feed.pick != null) chosen else RdmFiles.newest(files, feed.matches))
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {

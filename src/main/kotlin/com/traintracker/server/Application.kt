@@ -3,6 +3,7 @@ package com.traintracker.server
 import com.traintracker.server.auth.AuthDatabase
 import com.traintracker.server.cif.CifDownloader
 import com.traintracker.server.cif.CorpusLookup
+import com.traintracker.server.cif.LocationData
 import com.traintracker.server.cif.SmartLookup
 import com.traintracker.server.database.AppDatabase
 import com.traintracker.server.kafka.AllocationConsumer
@@ -163,6 +164,7 @@ private suspend fun startupTasks(scope: CoroutineScope) {
     VstpConsumer.start(scope)
     AllocationConsumer.start(scope)
     DarwinConsumer.start(scope)
+    LocationData.register()
     SmartLookup.start(scope)
     TdConsumer.start(scope)
     log.info("Kafka consumers started")
