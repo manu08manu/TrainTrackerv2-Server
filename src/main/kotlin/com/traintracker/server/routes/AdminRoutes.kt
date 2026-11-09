@@ -2,6 +2,7 @@ package com.traintracker.server.routes
 
 import com.traintracker.server.auth.AuthDatabase
 import com.traintracker.server.cif.CorpusLookup
+import com.traintracker.server.cif.LocationData
 import com.traintracker.server.database.AppDatabase
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.request.receiveText
@@ -62,7 +63,9 @@ fun Route.adminRoutes() {
         CorpusLookup.updateTiplocName(tiploc, name, editor)
         AuthDatabase.logTiplocChange(tiploc, oldName, name, editor)
         AppDatabase.deleteMissingTiploc(tiploc)
-        respondOk("tiploc" to tiploc, "name" to name)
+        val autoStanox = LocationData.stanoxForTiploc(tiploc)
+        val effectiveStanox = autoStanox?.let { AuthDatabase.setStanoxOverrideIfEmpty(tiploc, it, editor) } ?: ""
+        respondOk("tiploc" to tiploc, "name" to name, "stanox" to effectiveStanox)
     }
     adminPost("/admin/tsc-operator") {
         val tsc = param("tsc", true)

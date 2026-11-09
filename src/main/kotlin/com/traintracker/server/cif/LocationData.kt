@@ -87,6 +87,13 @@ object LocationData {
         }
     }
 
+    /** PIF/NLC STANOX for a TIPLOC. NLC wins, PIF fills the gap (matches build()). */
+    fun stanoxForTiploc(tiploc: String): String? {
+        val n = cleanStanox(nlc[tiploc]?.stanox)
+        val p = cleanStanox(pif[tiploc]?.stanox)
+        return n ?: p
+    }
+
     private fun onSourceLoaded() {
         synchronized(lock) {
             // The CIF import is skipped on restart when the cache is already up to date, so onCif would not
