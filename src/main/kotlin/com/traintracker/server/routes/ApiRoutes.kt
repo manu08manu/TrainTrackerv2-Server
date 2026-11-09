@@ -287,7 +287,6 @@ fun Application.configureRoutes() {
             authRoutes()
             operatorRoutes()
             smartCoverageRoutes()
-            stanoxReviewRoutes()
             smartBerthRoutes()
             get("/cif-changes") {
                 val file = File("/opt/traintracker/cif_changes.json")
