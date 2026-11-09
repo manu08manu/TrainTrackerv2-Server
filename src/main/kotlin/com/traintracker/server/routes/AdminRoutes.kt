@@ -66,26 +66,6 @@ fun Route.adminRoutes() {
         val stanox = StanoxReview.fillOnNaming(tiploc, editor, stanoxBefore)
         respondOk("tiploc" to tiploc, "name" to name, "stanox" to stanox)
     }
-    adminPost("/admin/tiploc-stanox") {
-        val tiploc = param("tiploc", true)
-        val stanox = param("stanox")
-        if (tiploc.isEmpty() || !stanox.matches(Regex("\\d{5}"))) {
-            badRequest("tiploc and a 5-digit stanox required")
-            return@adminPost
-        }
-        val editor = changedBy()
-        val shared = AuthDatabase.stanoxConflicts(stanox, tiploc)
-        AuthDatabase.setStanoxOverride(tiploc, stanox, editor)
-        CorpusLookup.reloadStanoxOverrides()
-        respond(
-            buildJsonObject {
-                put("status", "ok")
-                put("tiploc", tiploc)
-                put("stanox", stanox)
-                put("sharedWith", shared.joinToString(", "))
-            }
-        )
-    }
     adminPost("/admin/tsc-operator") {
         val tsc = param("tsc", true)
         val operator = param("operator", true)
