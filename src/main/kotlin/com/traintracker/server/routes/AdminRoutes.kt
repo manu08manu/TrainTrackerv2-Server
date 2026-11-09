@@ -59,12 +59,10 @@ fun Route.adminRoutes() {
         }
         val oldName = CorpusLookup.nameFromTiploc(tiploc)
         val editor = changedBy()
-        val stanoxBefore = StanoxReview.currentStanox(tiploc)
         CorpusLookup.updateTiplocName(tiploc, name, editor)
         AuthDatabase.logTiplocChange(tiploc, oldName, name, editor)
         AppDatabase.deleteMissingTiploc(tiploc)
-        val stanox = StanoxReview.fillOnNaming(tiploc, editor, stanoxBefore)
-        respondOk("tiploc" to tiploc, "name" to name, "stanox" to stanox)
+        respondOk("tiploc" to tiploc, "name" to name)
     }
     adminPost("/admin/tsc-operator") {
         val tsc = param("tsc", true)

@@ -57,8 +57,6 @@ object CorpusLookup {
     private val missingTscTracker = MissingItemTracker("missing_tscs", "tsc")
     private val stanoxToTiploc = HashMap<String, String>(10000)
     @Volatile
-    private var tiplocToCifStanox: Map<String, String> = emptyMap()
-    @Volatile
     private var stanoxCrsOverrides: Map<String, String> = emptyMap()
     @Volatile
     private var stanoxTiplocOverrides: Map<String, String> = emptyMap()
@@ -122,18 +120,8 @@ object CorpusLookup {
         log.info("CorpusLookup: merged ${stanoxEntries.size} stanox entries")
     }
 
-    fun cifStanoxForTiploc(tiploc: String): String? = tiplocToCifStanox[tiploc]
-
     fun mergeStanoxToTiplocFromFeed(entries: Map<String, String>) {
         stanoxToTiploc.putAll(entries)
-        val byTiploc = HashMap<String, String>(stanoxToTiploc.size)
-        val multi = HashSet<String>()
-        for ((sx, tpx) in stanoxToTiploc) {
-            val prev = byTiploc[tpx]
-            if (prev != null && prev != sx) multi.add(tpx) else byTiploc[tpx] = sx
-        }
-        for (tp in multi) byTiploc.remove(tp)
-        tiplocToCifStanox = byTiploc
         log.info("CorpusLookup: merged ${entries.size} stanox->tiploc entries")
     }
 

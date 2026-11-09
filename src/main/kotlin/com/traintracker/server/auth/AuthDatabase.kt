@@ -313,21 +313,6 @@ object AuthDatabase {
         setLocationOverride("crs", tiploc, crs, changedBy)
     }
 
-    fun setStanoxOverride(tiploc: String, stanox: String, changedBy: String) {
-        setLocationOverride("stanox", tiploc, stanox, changedBy)
-    }
-
-    fun stanoxConflicts(stanox: String, tiploc: String): List<String> {
-        if (!stanox.matches(Regex("\\d{5}"))) return emptyList()
-        val out = mutableListOf<String>()
-        transaction {
-            exec("SELECT tiploc, crs FROM location_overrides WHERE stanox = '$stanox' AND tiploc != '${tiploc.replace("'", "''")}'") { rs ->
-                while (rs.next()) out.add("${rs.getString(1)}=${rs.getString(2) ?: ""}")
-            }
-        }
-        return out
-    }
-
     private fun setLocationOverride(col: String, tiploc: String, value: String, changedBy: String) {
         setOverride("location_overrides", "tiploc", col, tiploc, value, changedBy)
         transaction {
