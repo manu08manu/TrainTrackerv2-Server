@@ -16,7 +16,8 @@ private val rpLog = LoggerFactory.getLogger("RoutePoints")
 /**
  * Adds timing points the timetable does not list but TD sees this train pass ("PT" calls, isTdPoint): learned
  * from the last 35 days of td_events for the headcode, on days the uid ran, and placed between the calls the
- * train passes them between. On a day the train ran, each point shows the time TD saw it.
+ * train passes them between. On a day the train ran, each point shows the time TD saw it. They are passes,
+ * so the service page lists them only in its detailed view.
  */
 object RoutePoints {
     private val LONDON: ZoneId = ZoneId.of("Europe/London")
@@ -156,7 +157,7 @@ object RoutePoints {
                             name = inf?.name?.takeIf { it.isNotEmpty() },
                             scheduledTime = "",
                             platform = null,
-                            isPass = false,
+                            isPass = true,
                             stopType = "PT",
                             actualTime = hm,
                             actualDeparture = hm,
