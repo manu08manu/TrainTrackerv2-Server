@@ -13,7 +13,7 @@ data class StatusResponse(
     val trustMovementCount: Int = 0,
     val trustMovementCount24h: Int = 0,
     val allocationsToday: Int = 0,
-    val hspUnitCount: Int = 0,
+    val allocationRecords: Int = 0,
     val tiplocNameCount: Int = 0,
     val cifChangePendingCount: Int = 0,
     val missingTiplocCount: Int = 0,

@@ -12,8 +12,8 @@ object Schema {
     const val MASTER_ADMIN_BOOTSTRAP_EMAIL = "tannajaisal@gmail.com"
 
     private val exposedTables = arrayOf(
-        HspCache, Schedules, Movements, TrainLocations, CifMeta, AllocationConsists, AllocationLegs,
-        HeadcodeAliases, AllocationHistory, AllocationChanges, CifAssociations, DarwinPlatforms, DarwinRidUid,
+        SavedMaps, Schedules, Movements, TrainLocations, CifMeta, AllocationConsists, AllocationLegs,
+        HeadcodeAliases, AllocationHistory, AllocationChanges, CifAssociations, DarwinPlatforms,
         TrainActivations,
     )
 
@@ -67,6 +67,7 @@ object Schema {
 
     fun create() {
         renameTrustMovements()
+        retireHsp()
         transaction {
             MigrationUtils.statementsRequiredForDatabaseMigration(*exposedTables).forEach { sql ->
                 if (sql.uppercase().contains("DROP ")) {
@@ -104,6 +105,23 @@ object Schema {
         if ("trust_movements" in tables && "movements" !in tables) {
             exec("ALTER TABLE trust_movements RENAME TO movements")
             log.info("Renamed trust_movements to movements")
+        }
+    }
+
+    /**
+     * HSP is gone: its cache table only still holds the saved STANOX maps, so it becomes saved_maps, and the
+     * Darwin RID-to-uid table, which only HSP's unit lookup read, is dropped.
+     */
+    private fun retireHsp() = transaction {
+        val tables = queryList("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('hsp_cache', 'saved_maps', 'darwin_rid_uid')") { it.getString(1) }
+        if ("hsp_cache" in tables && "saved_maps" !in tables) {
+            exec("DELETE FROM hsp_cache WHERE cache_key NOT IN ('stanox_map', 'stanox_tiploc_map')")
+            exec("ALTER TABLE hsp_cache RENAME TO saved_maps")
+            log.info("Renamed hsp_cache to saved_maps")
+        }
+        if ("darwin_rid_uid" in tables) {
+            exec("DROP TABLE darwin_rid_uid")
+            log.info("Dropped darwin_rid_uid")
         }
     }
 

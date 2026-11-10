@@ -12,7 +12,6 @@ import com.traintracker.server.kafka.TdConsumer
 import com.traintracker.server.routes.Punctuality
 import com.traintracker.server.kafka.VstpConsumer
 import com.traintracker.server.kafka.darwinPlatforms
-import com.traintracker.server.kafka.ridToUid
 import com.traintracker.server.kafka.trainIdToRid
 import com.traintracker.server.routes.configureRoutes
 import io.ktor.http.CacheControl
@@ -143,9 +142,8 @@ private suspend fun startBackgroundWork(scope: CoroutineScope) {
             try {
                 AppDatabase.pruneExpired()
                 trainIdToRid.keys.retainAll(AppDatabase.loadTrainActivations().keys)
-                ridToUid.keys.retainAll(AppDatabase.loadDarwinRidUid().keys)
                 darwinPlatforms.clear()
-                log.info("TRUST movements, allocations, Darwin platforms and HSP cache pruned")
+                log.info("Movements, allocations and Darwin platforms pruned")
             } catch (e: Exception) {
                 log.warn("Prune error: ${e.message}")
             }
@@ -177,11 +175,6 @@ private fun restoreSavedState() {
     if (activations.isNotEmpty()) {
         trainIdToRid.putAll(activations)
         log.info("Reloaded ${activations.size} train activations from DB")
-    }
-    val ridUidMap = AppDatabase.loadDarwinRidUid()
-    if (ridUidMap.isNotEmpty()) {
-        ridToUid.putAll(ridUidMap)
-        log.info("Reloaded ${ridUidMap.size} Darwin RID→UID mappings from DB")
     }
     val stanoxMap = AppDatabase.loadStanoxMap()
     if (stanoxMap.isNotEmpty()) {

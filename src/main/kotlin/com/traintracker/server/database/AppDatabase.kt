@@ -100,8 +100,6 @@ object AppDatabase {
         transaction { AllocationChanges.deleteWhere { AllocationChanges.changedAt less LocalDateTime.now(ZoneOffset.UTC).minusDays(30L) } }
         listOf(
             "DELETE FROM darwin_platforms WHERE updated_at < datetime('now', '-24 hours')",
-            "DELETE FROM darwin_rid_uid WHERE updated_at < datetime('now', '-30 days')",
-            "DELETE FROM hsp_cache WHERE cached_at < datetime('now', '-30 days') OR cache_key LIKE 'act:%'",
             "DELETE FROM train_activations WHERE updated_at < datetime('now', '-31 days')",
             "DELETE FROM schedules WHERE stp_indicator = 'N' AND schedule_end_date < date('now', '-30 days')",
             "DELETE FROM cif_change_alerts WHERE dismissed_at IS NOT NULL AND dismissed_at < datetime('now', '-7 days')",
@@ -321,31 +319,6 @@ object AppDatabase {
         }
     }
 
-    fun upsertDarwinRidUid(rid: String, uid: String) {
-        try {
-            transaction {
-                execUpdate(
-                    "INSERT INTO darwin_rid_uid(rid, uid, updated_at) VALUES(?, ?, ?) ON CONFLICT(rid) DO UPDATE SET uid=excluded.uid, updated_at=excluded.updated_at",
-                    listOf(rid, uid, utcStamp())
-                )
-            }
-        } catch (e: Exception) {
-            log.debug("DarwinRidUid upsert error: ${e.message}")
-        }
-    }
-
-    fun loadDarwinRidUid(): Map<String, String> = try {
-        transaction { queryList("SELECT rid, uid FROM darwin_rid_uid") { it.getString("rid") to it.getString("uid") }.toMap() }
-    } catch (e: Exception) {
-        emptyMap()
-    }
-
-    fun darwinUidForRid(rid: String): String? = try {
-        transaction { queryFirst("SELECT uid FROM darwin_rid_uid WHERE rid=?", listOf(rid)) { it.getString("uid") } }
-    } catch (e: Exception) {
-        null
-    }
-
     // ---- Schedules and associations ------------------------------------------------------------------
 
     /** (TSC, uid) of a schedule running today with this headcode. */
@@ -423,20 +396,6 @@ object AppDatabase {
         }
     }
 
-    fun getHspCache(key: String): String? = transaction {
-        HspCache.selectAll().where { HspCache.cacheKey eq key }.singleOrNull()?.get(HspCache.responseJson)
-    }
-
-    fun setHspCache(key: String, json: String) {
-        transaction {
-            HspCache.upsert {
-                it[cacheKey] = key
-                it[responseJson] = json
-                it[cachedAt] = Instant.now().toString()
-            }
-        }
-    }
-
     fun saveStanoxMap(map: Map<String, String>) = saveMap("stanox_map", map)
     fun loadStanoxMap(): Map<String, String> = loadMap("stanox_map")
     fun saveStanoxTiplocMap(map: Map<String, String>) = saveMap("stanox_tiploc_map", map)
@@ -447,16 +406,16 @@ object AppDatabase {
         val json = JSONObject()
         map.forEach { (k, v) -> json.put(k, v) }
         transaction {
-            HspCache.replace {
-                it[HspCache.cacheKey] = key
-                it[HspCache.responseJson] = json.toString()
-                it[HspCache.cachedAt] = Instant.now().toString()
+            SavedMaps.replace {
+                it[SavedMaps.key] = key
+                it[SavedMaps.json] = json.toString()
+                it[SavedMaps.savedAt] = Instant.now().toString()
             }
         }
     }
 
     private fun loadMap(key: String): Map<String, String> {
-        val raw = getHspCache(key) ?: return emptyMap()
+        val raw = transaction { SavedMaps.selectAll().where { SavedMaps.key eq key }.singleOrNull()?.get(SavedMaps.json) } ?: return emptyMap()
         return try {
             val json = JSONObject(raw)
             json.keySet().associateWith { json.getString(it) }
@@ -486,7 +445,7 @@ object AppDatabase {
                 trustMovementCount24h = Movements.selectAll()
                     .where { Movements.eventTs greaterEq LocalDateTime.now().minusHours(24L) }.count().toInt(),
                 allocationsToday = count("SELECT COUNT(DISTINCT headcode) FROM allocation_history WHERE service_date=?", listOf(today)),
-                hspUnitCount = AllocationConsists.selectAll().count().toInt(),
+                allocationRecords = AllocationConsists.selectAll().count().toInt(),
                 tiplocNameCount = CorpusLookup.tiplocNameCount(),
                 cifChangePendingCount = count("SELECT COUNT(*) FROM cif_change_alerts WHERE dismissed_at IS NULL"),
                 missingTiplocCount = count("SELECT COUNT(*) FROM missing_tiplocs"),

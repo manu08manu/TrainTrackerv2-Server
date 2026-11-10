@@ -90,21 +90,13 @@ object HeadcodeAliases : Table("headcode_aliases") {
     override val primaryKey = PrimaryKey(oldHeadcode, name = "pk_headcode_aliases")
 }
 
-object DarwinRidUid : Table("darwin_rid_uid") {
-    val rid = varchar("rid", 20)
-    val uid = varchar("uid", 10)
-    val updatedAt = varchar("updated_at", 20)
+/** The STANOX maps learnt from the feeds, kept across restarts (keys "stanox_map" and "stanox_tiploc_map"). */
+object SavedMaps : Table("saved_maps") {
+    val key = varchar("cache_key", 200)
+    val json = text("response_json")
+    val savedAt = text("cached_at")
 
-    override val primaryKey = PrimaryKey(rid)
-}
-
-/** HSP responses, plus the saved STANOX maps (keys "stanox_map" and "stanox_tiploc_map"). */
-object HspCache : Table("hsp_cache") {
-    val cacheKey = varchar("cache_key", 200)
-    val responseJson = text("response_json")
-    val cachedAt = text("cached_at")
-
-    override val primaryKey = PrimaryKey(cacheKey, name = "pk_hsp_cache")
+    override val primaryKey = PrimaryKey(key, name = "pk_hsp_cache")
 }
 
 object TrainActivations : Table("train_activations") {
