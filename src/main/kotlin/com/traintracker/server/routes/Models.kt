@@ -76,6 +76,8 @@ data class ServiceResponse(
     val destName: String? = null,
     val originName: String? = null,
     val isPredicted: Boolean = false,
+    /** The train has reported a movement on this service day. */
+    val isRunning: Boolean = false,
     val link: String? = null,
     val serviceDate: String = ""
 )

@@ -15,9 +15,12 @@ import java.util.concurrent.ConcurrentHashMap
 private const val INDEX_HTML: String = "${Config.DATA_DIR}/index.html"
 private val staticHtmlCache = ConcurrentHashMap<String, String>()
 
-/** Serves a page, read once and cached. Any query string gets a 404. */
+/** Query parameters the single page app keeps board state in: time, operator filter and timeframe. */
+private val PAGE_QUERY_KEYS = setOf("t", "op", "tf", "from", "to")
+
+/** Serves a page, read once and cached. A query string with any other parameter gets a 404. */
 private suspend fun ApplicationCall.serveStaticHtml(path: String, notFoundMsg: String = "Not found") {
-    if (request.queryString().isNotEmpty()) {
+    if (request.queryString().isNotEmpty() && !PAGE_QUERY_KEYS.containsAll(request.queryParameters.names())) {
         respond(HttpStatusCode.NotFound)
         return
     }

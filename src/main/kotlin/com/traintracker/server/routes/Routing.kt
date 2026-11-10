@@ -65,6 +65,7 @@ fun Application.configureRoutes() {
             statusRoutes()
             boardRoutes()
             serviceDetailRoutes()
+            serviceHistoryRoutes()
             trustRoutes()
             hspRoutes()
             allocationRoutes()
@@ -110,6 +111,17 @@ private fun timeWindow(windowMinutes: Int, offsetMinutes: Int = 0): Pair<String,
     return start.format(fmt) to start.plusMinutes(windowMinutes.toLong()).format(fmt)
 }
 
+/** The "from" parameter ("HH:mm") as minutes after midnight, or null when absent or invalid. */
+private fun ApplicationCall.fromMinutes(): Int? {
+    val raw = parameters["from"]?.trim() ?: return null
+    if (!Regex("^([01]\\d|2[0-3]):[0-5]\\d$").matches(raw)) return null
+    return raw.toMinutes()
+}
+
+/** A window of [windowMinutes] starting at [fromMinutes] after midnight, ending no later than 23:59. */
+private fun fixedWindow(fromMinutes: Int, windowMinutes: Int): Pair<String, String> =
+    clockTime(fromMinutes) to clockTime(minOf(fromMinutes + windowMinutes.coerceIn(1, 1439), 1439))
+
 /** Runs a service search off the request thread and adds units and associations. */
 private suspend fun searchServices(date: String, query: () -> List<ServiceResponse>): List<ServiceResponse> =
     withContext(Dispatchers.IO) { annotateSplits(enrichWithUnits(query(), date)) }
@@ -132,7 +144,10 @@ private suspend fun ApplicationCall.respondBoard(mode: BoardMode) {
     val window = parameters["window"]?.toIntOrNull() ?: 120
     val offsetRaw = parameters["offset"]?.toIntOrNull() ?: 0
     val date = dateParam()
-    val (start, end) = if (date == LocalDate.now().toString()) {
+    val from = fromMinutes()
+    val (start, end) = if (from != null) {
+        fixedWindow(from, window)
+    } else if (date == LocalDate.now().toString()) {
         val nowMins = LocalTime.now().let { it.hour * 60 + it.minute }
         val offset = maxOf(offsetRaw, -nowMins)
         if (offset >= 1440 - nowMins) return respond(BoardResponse(crs, mode.name, "23:59", "23:59", emptyList()))
@@ -172,7 +187,7 @@ private fun Route.boardRoutes() {
         val window = call.parameters["window"]?.toIntOrNull() ?: 120
         val offset = call.parameters["offset"]?.toIntOrNull() ?: 0
         val date = call.dateParam()
-        val (start, end) = timeWindow(window, offset)
+        val (start, end) = call.fromMinutes()?.let { fixedWindow(it, window) } ?: timeWindow(window, offset)
         val services = withContext(Dispatchers.IO) { enrichWithUnits(queryBoard(crs, start, end, BoardMode.ALL, false, false, date), date) }
         call.respond(BoardResponse(crs, "ALL", start, end, services))
     }

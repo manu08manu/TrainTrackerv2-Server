@@ -326,6 +326,7 @@ private fun JdbcTransaction.boardServices(
     val trust = mutableMapOf<String, Triple<String, Boolean, String?>>()
     val trustReasonCode = mutableMapOf<String, String?>()
     val lastDelay = mutableMapOf<String, Int>()   // uid -> minutes late at its latest reported call
+    val running = mutableSetOf<String>()          // uids with any reported (not cancelled) movement
     if (uids.isNotEmpty()) {
         try {
             val args = uids.toList() + serviceDayArgs(date)
@@ -357,6 +358,7 @@ private fun JdbcTransaction.boardServices(
                         trust.putIfAbsent(uid, entry)
                         if (!trustReasonCode.containsKey(uid)) trustReasonCode[uid] = reasonCode
                     }
+                    if (!isCancelled && actualTime.isNotEmpty()) running += uid
                     if (!isCancelled && actualTime.isNotEmpty() && uid !in lastDelay) {
                         val late = minutesLate(actualTime, scht)
                         if (late >= 0) lastDelay[uid] = late
@@ -417,6 +419,7 @@ private fun JdbcTransaction.boardServices(
             isCancelled = isCancelled,
             cancelReason = cancelEntry?.third ?: if (timetableCancelled) TIMETABLE_CANCELLED else null,
             isPredicted = predicted,
+            isRunning = uid in running,
             link = "/?service=$uid&crs=$safeCrs&date=$date",
             serviceDate = date
         )
