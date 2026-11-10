@@ -66,6 +66,7 @@ fun Application.configureRoutes() {
             boardRoutes()
             serviceDetailRoutes()
             serviceHistoryRoutes()
+            punctualityRoutes()
             trustRoutes()
             hspRoutes()
             allocationRoutes()
