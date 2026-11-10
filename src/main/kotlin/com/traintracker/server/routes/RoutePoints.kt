@@ -71,21 +71,7 @@ object RoutePoints {
                 mins.add(a)
                 prev = a
             }
-            val stanoxByTiploc = HashMap<String, String>()
-            transaction {
-                val tiplocs = cleanList(cps.map { it.tiploc })
-                val il = placeholders(tiplocs.size)
-                query(
-                    "SELECT tiploc, stanox, 0 AS p FROM location_overrides WHERE tiploc IN ($il) AND stanox IS NOT NULL AND stanox != '' UNION ALL SELECT tiploc, stanox, 2 FROM pif_loc WHERE tiploc IN ($il) AND stanox IS NOT NULL AND stanox != '' UNION ALL SELECT tiploc, stanox, 1 FROM nlc_loc WHERE tiploc IN ($il) AND stanox IS NOT NULL AND stanox != '' ORDER BY p",
-                    tiplocs + tiplocs + tiplocs
-                ) { rs ->
-                    while (rs.next()) {
-                        val tl = rs.getString(1)
-                        val sx = rs.getString(2)
-                        if (tl != null && sx != null && !stanoxByTiploc.containsKey(tl)) stanoxByTiploc[tl] = sx
-                    }
-                }
-            }
+            val stanoxByTiploc = stanoxesFor(cps.map { it.tiploc })
             val anchors = cps.mapIndexed { i, cp -> Anchor(cp.tiploc, mins[i], stanoxByTiploc[cp.tiploc]) }
             val key = "$uid|${cps.joinToString(",") { it.tiploc }}"
             val now = System.currentTimeMillis()
@@ -100,25 +86,7 @@ object RoutePoints {
             }
             if (learned.isEmpty()) return cps
             val stanoxes = learned.map { it.stanox }
-            val info = HashMap<String, Info>()
-            transaction {
-                val sx = cleanList(stanoxes)
-                val ils = placeholders(sx.size)
-                query(
-                    "SELECT stanox, tiploc, name FROM (SELECT stanox, tiploc, name, 0 AS p FROM location_overrides WHERE stanox IN ($ils) UNION ALL SELECT stanox, tiploc, name, 1 FROM pif_loc WHERE stanox IN ($ils) UNION ALL SELECT stanox, tiploc, description, 2 FROM nlc_loc WHERE stanox IN ($ils)) ORDER BY p, LENGTH(name), tiploc",
-                    sx + sx + sx
-                ) { rs ->
-                    while (rs.next()) {
-                        val sx = rs.getString(1)
-                        val tl = rs.getString(2)
-                        val nm = rs.getString(3)
-                        if (sx != null) {
-                            val cur = info[sx]
-                            if (cur == null || cur.name.isNullOrEmpty() && !nm.isNullOrEmpty()) info[sx] = Info(tl, nm)
-                        }
-                    }
-                }
-            }
+            val info = infoFor(stanoxes)
             val dayStart = LocalDate.parse(svcDate).atStartOfDay(LONDON).toEpochSecond()
             val lo = dayStart + mins.first() * 60L - LEAD_S
             val hi = dayStart + mins.last() * 60L + TAIL_S
@@ -174,6 +142,123 @@ object RoutePoints {
             rpLog.debug("RoutePoints merge failed: ${e.message}")
             cps
         }
+    }
+
+    /** TIPLOC -> STANOX (location overrides first, then NLC, then PIF). */
+    private fun stanoxesFor(tiplocList: Collection<String>): Map<String, String> {
+        val out = HashMap<String, String>()
+        val tiplocs = cleanList(tiplocList)
+        if (tiplocs.isEmpty()) return out
+        transaction {
+            val il = placeholders(tiplocs.size)
+            query(
+                "SELECT tiploc, stanox, 0 AS p FROM location_overrides WHERE tiploc IN ($il) AND stanox IS NOT NULL AND stanox != '' UNION ALL SELECT tiploc, stanox, 2 FROM pif_loc WHERE tiploc IN ($il) AND stanox IS NOT NULL AND stanox != '' UNION ALL SELECT tiploc, stanox, 1 FROM nlc_loc WHERE tiploc IN ($il) AND stanox IS NOT NULL AND stanox != '' ORDER BY p",
+                tiplocs + tiplocs + tiplocs
+            ) { rs ->
+                while (rs.next()) {
+                    val tl = rs.getString(1)
+                    val sx = rs.getString(2)
+                    if (tl != null && sx != null && !out.containsKey(tl)) out[tl] = sx
+                }
+            }
+        }
+        return out
+    }
+
+    /** STANOX -> its TIPLOC and the best name we have for it. */
+    private fun infoFor(stanoxList: Collection<String>): Map<String, Info> {
+        val info = HashMap<String, Info>()
+        val sx = cleanList(stanoxList)
+        if (sx.isEmpty()) return info
+        transaction {
+            val ils = placeholders(sx.size)
+            query(
+                "SELECT stanox, tiploc, name FROM (SELECT stanox, tiploc, name, 0 AS p FROM location_overrides WHERE stanox IN ($ils) UNION ALL SELECT stanox, tiploc, name, 1 FROM pif_loc WHERE stanox IN ($ils) UNION ALL SELECT stanox, tiploc, description, 2 FROM nlc_loc WHERE stanox IN ($ils)) ORDER BY p, LENGTH(name), tiploc",
+                sx + sx + sx
+            ) { rs ->
+                while (rs.next()) {
+                    val x = rs.getString(1)
+                    val tl = rs.getString(2)
+                    val nm = rs.getString(3)
+                    if (x != null) {
+                        val cur = info[x]
+                        if (cur == null || cur.name.isNullOrEmpty() && !nm.isNullOrEmpty()) info[x] = Info(tl, nm)
+                    }
+                }
+            }
+        }
+        return info
+    }
+
+    /**
+     * Around a call LINX moved to another location (code 06, [CallingPointResponse.replaces]) the timetabled
+     * passing points describe the booked route, not the one taken. Once the train has been seen at the new
+     * location, the stretch between the calls either side of it shows only where TD or LINX saw the train:
+     * timetabled points it was not seen at are dropped (9H08: Heathrow Tunnel Jn), those it was seen at get
+     * their own times, and points seen that the timetable lacks are added (9H08: Stockley Jn), in time order.
+     */
+    fun followChangedLocations(cps: List<CallingPointResponse>, uid: String, svcDate: String, headcode: String): List<CallingPointResponse> {
+        val hc = clean(headcode)
+        if (hc.length != 4 || cps.none { it.replaces != null }) return cps
+        return try {
+            var out = cps
+            for (tiploc in cps.filter { it.replaces != null }.map { it.tiploc }) {
+                out = followChangedLocation(out, out.indexOfFirst { it.tiploc == tiploc }, uid, svcDate, hc)
+            }
+            out
+        } catch (e: Exception) {
+            rpLog.debug("RoutePoints followChangedLocations failed: ${e.message}")
+            cps
+        }
+    }
+
+    private fun followChangedLocation(cps: List<CallingPointResponse>, r: Int, uid: String, svcDate: String, hc: String): List<CallingPointResponse> {
+        val changed = cps.getOrNull(r) ?: return cps
+        val dayStart = LocalDate.parse(svcDate).atStartOfDay(LONDON).toEpochSecond()
+        fun secs(t: String?): Long? = parseMin(t)?.let { dayStart + it * 60L }
+        val at = secs(changed.actualTime) ?: return cps   // not seen there yet
+        val a = (r - 1 downTo 0).firstOrNull { !cps[it].isPass } ?: -1
+        val b = (r + 1 until cps.size).firstOrNull { !cps[it].isPass } ?: cps.size
+        val lo = cps.getOrNull(a)?.actualTime?.let(::secs) ?: (at - 600)
+        val hi = (cps.getOrNull(b)?.actualTime?.let(::secs) ?: (at + 600)) + 59
+        if (lo > at || hi < at) return cps   // across midnight: leave as booked
+
+        // Where the train was seen in the stretch: TD berth steps and LINX reports, earliest per STANOX.
+        val seen = HashMap<String, Long>()
+        fun see(stanox: String?, s: Long?) {
+            if (stanox.isNullOrEmpty() || s == null || s < lo || s > hi) return
+            if (s < (seen[stanox] ?: Long.MAX_VALUE)) seen[stanox] = s
+        }
+        transaction {
+            query("SELECT stanox, MIN(event_s) FROM td_events WHERE headcode = ? AND event_s BETWEEN $lo AND $hi GROUP BY stanox", listOf(hc)) { rs ->
+                while (rs.next()) see(rs.getString(1), rs.getLong(2))
+            }
+            query(
+                "SELECT stanox, actual_time FROM movements WHERE uid = ? AND actual_time IS NOT NULL AND event_ts >= ? AND event_ts < ?",
+                listOf(clean(uid), svcDate, LocalDate.parse(svcDate).plusDays(2).toString())
+            ) { rs ->
+                while (rs.next()) see(rs.getString(1), secs(rs.getString(2)))
+            }
+        }
+        val stanoxOf = stanoxesFor(cps.map { it.tiploc })
+        fun hm(s: Long) = Instant.ofEpochSecond(s).atZone(LONDON).format(HM)
+        fun hms(s: Long) = Instant.ofEpochSecond(s).atZone(LONDON).format(HMS)
+
+        val kept = cps.subList(a + 1, b).mapNotNull { cp ->
+            if (cp === changed) return@mapNotNull (stanoxOf[cp.tiploc]?.let { seen[it] } ?: at) to cp
+            val s = stanoxOf[cp.tiploc]?.let { seen[it] } ?: return@mapNotNull null
+            s to cp.copy(actualTime = hm(s), actualArrival = "", actualDeparture = hm(s), actualDepartureSec = hms(s), isPredicted = false, isCancelled = false, cancelReason = null)
+        }
+        val known = cps.mapNotNull { stanoxOf[it.tiploc] }.toSet()
+        val info = infoFor(seen.keys - known)
+        val added = (seen - known).map { (sx, s) ->
+            s to CallingPointResponse(
+                tiploc = info[sx]?.tiploc?.takeIf { it.isNotEmpty() } ?: sx, crs = null, name = info[sx]?.name?.takeIf { it.isNotEmpty() },
+                scheduledTime = "", platform = null, isPass = true, stopType = "PT",
+                actualTime = hm(s), actualDeparture = hm(s), actualDepartureSec = hms(s), isTdPoint = true,
+            )
+        }
+        return cps.subList(0, a + 1) + (kept + added).sortedBy { it.first }.map { it.second } + cps.subList(b, cps.size)
     }
 
     private fun activationDays(hc: String, dates: Set<LocalDate>): Map<LocalDate, Set<String>> {

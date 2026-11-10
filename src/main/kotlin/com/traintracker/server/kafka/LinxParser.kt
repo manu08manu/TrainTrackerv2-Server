@@ -28,6 +28,8 @@ internal data class LinxModification(
     val trainId: String, val uid: String, val headcode: String, val startDate: String,
     val code: String, val kind: String, val tiploc: String?, val stanox: String?, val time: String?,
     val reason: String?, val modifiedAt: String?, override val receivedMs: Long, val previousHeadcode: String? = null,
+    /** Every LocationModified, as "TIPLOC|ModificationStatusIndicator|TrainLocationStatus|booked" joined by ";". */
+    val locations: String? = null,
 ) : LinxMessage()
 
 /** A message kept as-is: an unknown flow or one that failed to parse. */
@@ -140,11 +142,21 @@ internal class LinxParser(
         }
         val loc = mod?.first("LocationModified")
         val tiploc = tiplocIn(loc)
+        // A message can hold several modifications, each listing locations marked by ModificationStatusIndicator
+        // (e.g. 95 at Heathrow T2 & 3 plus 06 adding West Drayton); keep them all. [code] is the first one's.
+        val all = root.getElementsByTagName("LocationModified")
+        val locations = (0 until all.length).mapNotNull { all.item(it) as? Element }.joinToString(";") { l ->
+            listOf(
+                tiplocIn(l) ?: "", l.text("ModificationStatusIndicator") ?: "", l.text("TrainLocationStatus") ?: "",
+                l.text("BookedLocationDateTime") ?: l.text("Time") ?: "",
+            ).joinToString("|")
+        }.ifEmpty { null }
         val reason = root.first("ModificationReason")?.getAttribute("NationalDelayCode")?.takeIf { it.isNotEmpty() }
         return LinxModification(
             ids.trainId, ids.uid, ids.headcode, ids.startDate, code, kind, tiploc, tiploc?.let(stanoxOf),
             loc?.text("Time"), reason, root.text("TrainJourneyModificationTime"), receivedMs,
             previousHeadcode = root.first("ReferenceOTN")?.text("OperationalTrainNumber")?.take(4),
+            locations = locations,
         )
     }
 

@@ -119,7 +119,9 @@ data class CallingPointResponse(
     val cancelReason: String? = null,
     val isPredicted: Boolean = false,
     val length: Int? = null,
-    val isTdPoint: Boolean = false
+    val isTdPoint: Boolean = false,
+    /** Name of the booked location this call replaced (LINX change of location). */
+    val replaces: String? = null
 )
 
 @Serializable
