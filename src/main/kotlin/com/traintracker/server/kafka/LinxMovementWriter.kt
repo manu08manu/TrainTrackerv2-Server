@@ -41,10 +41,10 @@ internal object LinxMovementWriter {
         if (stanox == null) return null
         val resolvedUid = uid.ifEmpty { trainIdToRid[trainId] ?: "" }
         val type = if (eventType == "DEPARTURE") "DEPARTURE" else "ARRIVAL"
-        CorpusLookup.checkTrustMovementForMissingName(stanox, headcode)
-        CorpusLookup.checkTrustMovementForMissingAtoc(headcode)
+        CorpusLookup.checkMovementForMissingName(stanox, headcode)
+        CorpusLookup.checkMovementForMissingAtoc(headcode)
         if (actualTime.isNotEmpty()) {
-            TdCorrelator.onTrust(headcode, stanox, type, actualTime)
+            TdCorrelator.onMovement(headcode, stanox, type, actualTime)
             if (SmartLookup.isLoaded() && !SmartLookup.hasCoverage(stanox, type)) CorpusLookup.recordNoSmartCoverage(stanox, type, headcode)
         }
         if (actualTime.isNotEmpty() && type == "DEPARTURE") {

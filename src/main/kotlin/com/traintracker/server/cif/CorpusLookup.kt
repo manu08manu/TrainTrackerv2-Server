@@ -166,8 +166,8 @@ object CorpusLookup {
 
     fun namesFromTiplocs(tiplocs: Set<String>): Map<String, String?> = tiplocs.associateWith { nameFromTiploc(it) }
 
-    /** Records the TIPLOC of a TRUST movement when it has no name override. */
-    fun checkTrustMovementForMissingName(stanox: String, headcode: String = "") {
+    /** Records the TIPLOC of a movement when it has no name override. */
+    fun checkMovementForMissingName(stanox: String, headcode: String = "") {
         val tiploc = tiplocFromStanox(stanox) ?: return
         if (tiplocToName[tiploc] == null) {
             val uid = if (headcode.isNotEmpty()) AppDatabase.scheduleForHeadcode(headcode)?.second ?: "" else ""
@@ -176,7 +176,7 @@ object CorpusLookup {
     }
 
     /** Records the TSC of today's schedule for a headcode when it has no operator. */
-    fun checkTrustMovementForMissingAtoc(headcode: String) {
+    fun checkMovementForMissingAtoc(headcode: String) {
         if (headcode.isEmpty()) return
         val (tsc, uid) = AppDatabase.scheduleForHeadcode(headcode) ?: return
         recordMissingTscIfNoOverride(tsc, headcode, uid)

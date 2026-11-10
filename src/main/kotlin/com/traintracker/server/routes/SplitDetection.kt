@@ -10,7 +10,7 @@ import org.jetbrains.exposed.v1.jdbc.JdbcTransaction
 
 // Splits and joins inferred from the units allocated to trains, for when the CIF has no association.
 
-/** True when TRUST has a train ID for the uid, within a day of [date], that only has cancellations. */
+/** True when the movements have a train ID for the uid, within a day of [date], that only has cancellations. */
 fun JdbcTransaction.isUidWhollyCancelled(uid: String, date: String): Boolean = queryFirst(
     "SELECT train_id FROM movements WHERE uid=? AND date(event_ts) BETWEEN date(?, '-1 day') AND date(?, '+1 day') GROUP BY train_id HAVING $CANCELLED_ONLY_SQL LIMIT 1",
     listOf(uid, date, date)

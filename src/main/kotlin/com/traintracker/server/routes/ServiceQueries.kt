@@ -43,7 +43,7 @@ private fun bestOriginRows(rows: List<ResultRow>): List<ResultRow> = rows.groupB
 // ---- Platforms ----------------------------------------------------------------------------------------
 
 /**
- * The platform to show and whether it is confirmed: TRUST (by CRS), then Darwin in memory, then Darwin from
+ * The platform to show and whether it is confirmed: reported movements (by CRS), then Darwin in memory, then Darwin from
  * the database [darwinDb]; otherwise the booked platform, unconfirmed.
  */
 internal fun resolvePlatform(
@@ -52,9 +52,9 @@ internal fun resolvePlatform(
     crs: String?,
     booked: String?,
     darwinDb: String?,
-    trustPlatforms: Map<Pair<String, String>, String>,
+    movementPlatforms: Map<Pair<String, String>, String>,
 ): Pair<String?, Boolean> {
-    crs?.let { trustPlatforms[uid to it] }?.let { return it to true }
+    crs?.let { movementPlatforms[uid to it] }?.let { return it to true }
     darwinPlatforms[uid]?.get(tiploc)?.let { return it to true }
     darwinDb?.let { return it to true }
     return booked to false
@@ -64,7 +64,7 @@ internal fun resolvePlatform(
 
 /**
  * Corrections to a service's origin and destination: an overlay ('O') schedule's own LO/LT, and the origin
- * TRUST activated the train from (which differs after a change of origin).
+ * LINX activated the train from (which differs after a change of origin).
  */
 internal class OriginDestOverrides(
     private val overlayDest: Map<String, Pair<String, String?>>,
@@ -175,11 +175,11 @@ internal fun queryByHeadcode(headcode: String, date: String = LocalDate.now().to
     searchResults(bestOriginRows(rows), date)
 }
 
-/** Services (one row each) with TRUST times and cancellations, platforms, origin/destination and associations. */
+/** Services (one row each) with reported times and cancellations, platforms, origin/destination and associations. */
 private fun searchResults(bestRows: List<ResultRow>, date: String): List<ServiceResponse> = transaction {
     val uids = bestRows.map { it[Schedules.uid] }.toSet()
     // "uid|scheduled time" -> latest (actual time, cancelled, reason); "uid" -> latest cancellation
-    val trust = mutableMapOf<String, Triple<String, Boolean, String?>>()
+    val moves = mutableMapOf<String, Triple<String, Boolean, String?>>()
     if (uids.isNotEmpty()) {
         try {
             query(
@@ -191,8 +191,8 @@ private fun searchResults(bestRows: List<ResultRow>, date: String): List<Service
                     val scht = rs.getString("scheduled_time") ?: continue
                     val cancelled = rs.getBoolean("is_cancelled")
                     val entry = Triple(rs.getString("actual_time") ?: "", cancelled, ReasonCodes.resolve(rs.getString("cancel_reason")))
-                    trust.putIfAbsent("$uid|$scht", entry)
-                    if (cancelled && rs.getString("event_type") != LinxMovementWriter.COO_CANCELLATION) trust.putIfAbsent(uid, entry)
+                    moves.putIfAbsent("$uid|$scht", entry)
+                    if (cancelled && rs.getString("event_type") != LinxMovementWriter.COO_CANCELLATION) moves.putIfAbsent(uid, entry)
                 }
             }
         } catch (e: Exception) {
@@ -201,14 +201,14 @@ private fun searchResults(bestRows: List<ResultRow>, date: String): List<Service
     val overrides = originDestOverrides(uids, date)
     val ctx = buildAssociationContext(uids)
     val darwinDb = AppDatabase.darwinPlatforms(uids)
-    val trustPlatforms = AppDatabase.trustPlatforms(uids)
+    val movementPlatforms = AppDatabase.movementPlatforms(uids)
     bestRows.sortedBy { it[Schedules.scheduledTime] }.map { row ->
         val scht = row[Schedules.scheduledTime]
         val uid = row[Schedules.uid]
-        val trustEntry = trust["$uid|$scht"] ?: trust[uid]?.takeIf { it.second }
-        val hasAnyActualTime = trust.entries.any { (k, v) -> k.startsWith("$uid|") && v.first.isNotEmpty() }
+        val moveEntry = moves["$uid|$scht"] ?: moves[uid]?.takeIf { it.second }
+        val hasAnyActualTime = moves.entries.any { (k, v) -> k.startsWith("$uid|") && v.first.isNotEmpty() }
         val (platform, confirmed) = resolvePlatform(
-            uid, row[Schedules.tiploc], row[Schedules.crs], row[Schedules.platform], darwinDb[uid to row[Schedules.tiploc]], trustPlatforms
+            uid, row[Schedules.tiploc], row[Schedules.crs], row[Schedules.platform], darwinDb[uid to row[Schedules.tiploc]], movementPlatforms
         )
         val (originTiploc, originCrs) = overrides.origin(row)
         val (destTiploc, destCrs) = overrides.dest(row)
@@ -227,11 +227,11 @@ private fun searchResults(bestRows: List<ResultRow>, date: String): List<Service
             destTiploc = destTiploc,
             originCrs = originCrs,
             destCrs = destCrs,
-            actualTime = trustEntry?.first ?: "",
-            isCancelled = ScheduleCancellations.effectiveCancelled(uid, date, trustEntry?.second ?: false, hasAnyActualTime),
+            actualTime = moveEntry?.first ?: "",
+            isCancelled = ScheduleCancellations.effectiveCancelled(uid, date, moveEntry?.second ?: false, hasAnyActualTime),
             isRunning = hasAnyActualTime,
-            cancelReason = trustEntry?.third
-                ?: if (trustEntry?.second != true && ScheduleCancellations.isCancelled(uid, date)) TIMETABLE_CANCELLED else null
+            cancelReason = moveEntry?.third
+                ?: if (moveEntry?.second != true && ScheduleCancellations.isCancelled(uid, date)) TIMETABLE_CANCELLED else null
         )
         applyAssociations(svc, ctx)
     }.withResolvedNames()

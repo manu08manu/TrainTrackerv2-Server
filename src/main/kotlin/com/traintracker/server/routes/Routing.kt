@@ -56,7 +56,7 @@ fun Application.configureRoutes() {
             serviceDetailRoutes()
             serviceHistoryRoutes()
             punctualityRoutes()
-            trustRoutes()
+            liveLocationRoutes()
             allocationRoutes()
             kbRoutes()
         }
@@ -78,7 +78,7 @@ private fun Route.statusRoutes() {
         if (q.length < 2) return@get call.respond(emptyList<Map<String, String>>())
         call.respond(CorpusLookup.searchStations(q, 20))
     }
-    // Dates the board can show: from the oldest TRUST movement to the end of the timetable.
+    // Dates the board can show: from the oldest movement to the end of the timetable.
     get("/board-date-range") {
         val range = dbQuery {
             val minEventTs = Movements.eventTs.min()
@@ -191,7 +191,7 @@ private fun Route.boardRoutes() {
         val date = call.dateParam()
         var services = searchServices(date) { queryByHeadcode(safeHc, date) }
         if (services.isEmpty()) {
-            // Search under the other headcode of a TRUST change of identity, showing the requested one.
+            // Search under the other headcode of a change of identity, showing the requested one.
             val aliasHc = dbQuery {
                 HeadcodeAliases.selectAll().where { HeadcodeAliases.newHeadcode eq safeHc }.firstOrNull()?.get(HeadcodeAliases.oldHeadcode)
                     ?: HeadcodeAliases.selectAll().where { HeadcodeAliases.oldHeadcode eq safeHc }.firstOrNull()?.get(HeadcodeAliases.newHeadcode)
@@ -222,7 +222,7 @@ private fun Route.boardRoutes() {
     }
 }
 
-// ---- Live train positions from TRUST -------------------------------------------------------------------
+// ---- Live train positions from LINX -------------------------------------------------------------------
 
 private fun TrainLocation.toResponse() = TrainLocationResponse(
     headcode, rid, stationName, crs, actualTime, eventType, delayMinutes, (System.currentTimeMillis() - updatedEpochMs) / 1000
@@ -239,7 +239,7 @@ private fun ResultRow.toLocationResponse() = TrainLocationResponse(
     -1L
 )
 
-private fun Route.trustRoutes() {
+private fun Route.liveLocationRoutes() {
     // Last departure of a headcode, from memory or else the last 24 hours in the database.
     get("/trust/{headcode}") {
         val headcode = call.pathParam("headcode").uppercase()

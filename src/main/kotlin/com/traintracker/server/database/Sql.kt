@@ -87,7 +87,7 @@ fun scheduleDateScope(date: String): Op<Boolean> =
 
 fun scheduleDateScopeArgs(date: String): List<String> = listOf(date, date, dayRunLikePattern(date))
 
-// ---- TRUST service day -----------------------------------------------------------------------------
+// ---- Movement service day -----------------------------------------------------------------------------
 // A TRUST train ID ends with the day of month it runs on, and its events fall between 12 hours before
 // and 36 hours after the start of that day.
 

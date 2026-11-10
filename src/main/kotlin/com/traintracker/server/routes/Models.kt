@@ -6,12 +6,12 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class StatusResponse(
     val cifLastDownload: String?,
-    val trustConnected: Boolean,
+    val linxConnected: Boolean,
     val trainLocationsCount: Int,
     val scheduleCount: Int = 0,
     val uniqueServiceCount: Int = 0,
-    val trustMovementCount: Int = 0,
-    val trustMovementCount24h: Int = 0,
+    val movementCount: Int = 0,
+    val movementCount24h: Int = 0,
     val allocationsToday: Int = 0,
     val allocationRecords: Int = 0,
     val tiplocNameCount: Int = 0,

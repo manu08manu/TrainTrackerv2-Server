@@ -162,7 +162,7 @@ internal fun JdbcTransaction.serviceHistory(uid: String): ServiceHistoryResponse
     fun stanoxName(stanox: String): String? = stanoxNames[stanox]
         ?: CorpusLookup.tiplocFromStanox(stanox)?.let { CorpusLookup.nameFromTiploc(it) }
 
-    // Days before TRUST data begins cannot be judged.
+    // Days before movement data begins cannot be judged.
     val dataStart = queryFirst("SELECT MIN(event_ts) FROM movements") { parseTs(it.getString(1)) }
         ?.toLocalDate()?.plusDays(1) ?: from
 

@@ -12,16 +12,16 @@ import kotlin.math.abs
 
 private val log = LoggerFactory.getLogger("TdOverlay")
 
-/** TD times for one headcode's service day, used to give TRUST events a time to the second. */
+/** TD times for one headcode's service day, used to give movements a time to the second. */
 class TdOverlay private constructor(private val byKey: Map<String, List<Long>>) {
     class Result(val minute: String, val seconds: String)
 
-    /** The TD time closest to when TRUST recorded the event (within 15 minutes), or null. */
-    fun resolve(stanox: String, eventType: String, trustEventTs: String?): Result? {
-        if (byKey.isEmpty() || trustEventTs.isNullOrEmpty()) return null
+    /** The TD time closest to when the event was recorded (within 15 minutes), or null. */
+    fun resolve(stanox: String, eventType: String, eventTs: String?): Result? {
+        if (byKey.isEmpty() || eventTs.isNullOrEmpty()) return null
         val list = byKey["$stanox|$eventType"] ?: return null
         val written = try {
-            LocalDateTime.parse(trustEventTs.replace(' ', 'T')).atZone(LONDON).toEpochSecond()
+            LocalDateTime.parse(eventTs.replace(' ', 'T')).atZone(LONDON).toEpochSecond()
         } catch (e: Exception) {
             return null
         }
