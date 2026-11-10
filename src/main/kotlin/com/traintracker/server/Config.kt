@@ -33,7 +33,6 @@ object Config {
 
     val sqlitePath: String = System.getenv("SQLITE_PATH") ?: "./traintracker.db"
 
-    val hspApiKey: String = optional("HSP_API_KEY")
 
     val kbDisruptionsKey: String = optional("KB_DISRUPTIONS_KEY")
     val kbDisruptionsUrl: String = optional("KB_DISRUPTIONS_URL")

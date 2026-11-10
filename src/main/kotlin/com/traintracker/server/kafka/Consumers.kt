@@ -2,23 +2,13 @@ package com.traintracker.server.kafka
 
 import com.traintracker.server.Config
 import com.traintracker.server.cif.CifParser
-import com.traintracker.server.cif.CorpusLookup
-import com.traintracker.server.cif.SmartLookup
 import com.traintracker.server.cif.insertStops
 import com.traintracker.server.database.AppDatabase
-import com.traintracker.server.database.MovementBatch
 import com.traintracker.server.database.Schedules
-import com.traintracker.server.database.Movements
-import com.traintracker.server.database.effectiveDateFor
-import com.traintracker.server.database.scheduleDateScope
 import java.time.Duration
-import java.time.Instant
-import java.time.LocalDate
-import java.time.ZoneId
 import java.util.Properties
 import java.util.concurrent.CancellationException
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.ConcurrentLinkedQueue
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -30,11 +20,8 @@ import org.apache.kafka.clients.consumer.KafkaConsumer
 import org.apache.kafka.common.serialization.StringDeserializer
 import org.jetbrains.exposed.v1.core.and
 import org.jetbrains.exposed.v1.core.eq
-import org.jetbrains.exposed.v1.core.less
 import org.jetbrains.exposed.v1.jdbc.deleteWhere
-import org.jetbrains.exposed.v1.jdbc.selectAll
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
-import org.jetbrains.exposed.v1.jdbc.update
 import org.json.JSONArray
 import org.json.JSONObject
 import org.slf4j.Logger
@@ -45,7 +32,6 @@ private val log = LoggerFactory.getLogger("KafkaConsumers")
 // Live state shared with the API routes.
 val trainLocations = ConcurrentHashMap<String, TrainLocation>()
 val trainIdToRid = ConcurrentHashMap<String, String>()   // TRUST-format train ID -> schedule uid (from LINX activations)
-val ridToUid = ConcurrentHashMap<String, String>()        // Darwin RID -> schedule uid
 val darwinPlatforms = ConcurrentHashMap<String, ConcurrentHashMap<String, String>>()   // uid -> TIPLOC -> platform
 
 data class TrainLocation(
@@ -123,8 +109,6 @@ object DarwinConsumer {
             val ts = JSONObject(payload).optJSONObject("uR")?.optJSONObject("TS") ?: return
             val rid = ts.optString("rid").ifEmpty { return }
             val uid = ts.optString("uid").ifEmpty { return }
-            ridToUid[rid] = uid
-            AppDatabase.upsertDarwinRidUid(rid, uid)
             val locations: JSONArray = when (val raw = ts.opt("Location")) {
                 is JSONArray -> raw
                 is JSONObject -> JSONArray().put(raw)

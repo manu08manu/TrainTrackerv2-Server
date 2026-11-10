@@ -1,6 +1,5 @@
 package com.traintracker.server.database
 
-import com.traintracker.server.kafka.ridToUid
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.ZoneOffset
@@ -320,22 +319,6 @@ object Allocations {
             }
             .orderBy(AllocationHistory.recordedAt, SortOrder.DESC)
             .map { it.toHistory() }
-    }
-
-    /** Allocation for a Darwin RID: by uid when the RID is known, else by core_id suffix in the history. */
-    fun byRid(rid: String): Allocation? {
-        if (rid.length < 9) return null
-        val date = "${rid.substring(0, 4)}-${rid.substring(4, 6)}-${rid.substring(6, 8)}"
-        val uid = ridToUid[rid] ?: AppDatabase.darwinUidForRid(rid)
-        if (uid != null) byUid(uid, date)?.let { return it }
-        return transaction {
-            queryFirst(
-                "SELECT core_id, headcode, service_date, operator, vehicles, units, unit_count FROM allocation_history WHERE (core_id LIKE '%' || ? || '%' OR core_id LIKE '%' || ? || '%') AND service_date = ? LIMIT 1",
-                listOf(rid.takeLast(5), rid.takeLast(7), date)
-            ) { rs ->
-                allocation(rs.getString(1) ?: "", "", date, "", rs.getString("vehicles"), rs.getString("units"), rs.getInt("unit_count"), "")
-            }
-        }
     }
 
     fun changes(uid: String, serviceDate: String): List<Change> = transaction {

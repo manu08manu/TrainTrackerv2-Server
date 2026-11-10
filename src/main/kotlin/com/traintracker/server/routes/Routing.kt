@@ -9,8 +9,6 @@ import com.traintracker.server.database.HeadcodeAliases
 import com.traintracker.server.database.Schedules
 import com.traintracker.server.database.TrainLocations
 import com.traintracker.server.database.Movements
-import com.traintracker.server.hsp.HspClient
-import com.traintracker.server.hsp.HspMetricsRequest
 import com.traintracker.server.kafka.TrainLocation
 import com.traintracker.server.kafka.trainLocations
 import io.ktor.http.ContentType
@@ -23,7 +21,6 @@ import io.ktor.server.response.respond
 import io.ktor.server.response.respondText
 import io.ktor.server.routing.Route
 import io.ktor.server.routing.get
-import io.ktor.server.routing.post
 import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
 import java.io.File
@@ -35,12 +32,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.buildJsonArray
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.put
 import org.jetbrains.exposed.v1.core.Op
 import org.jetbrains.exposed.v1.core.ResultRow
 import org.jetbrains.exposed.v1.core.SortOrder
@@ -68,7 +60,6 @@ fun Application.configureRoutes() {
             serviceHistoryRoutes()
             punctualityRoutes()
             trustRoutes()
-            hspRoutes()
             allocationRoutes()
             kbRoutes()
         }
@@ -310,78 +301,6 @@ private suspend fun ApplicationCall.jsonBody(): JsonObject? {
     } catch (e: Exception) {
         badRequest("Invalid JSON body")
         null
-    }
-}
-
-private fun JsonObject.text(key: String): String? = this[key]?.jsonPrimitive?.content
-
-private fun Route.hspRoutes() {
-    suspend fun ApplicationCall.respondMetrics(req: HspMetricsRequest) {
-        val result = withContext(Dispatchers.IO) { HspClient.getMetrics(req) }
-        if (result != null) respond(result) else respond(HttpStatusCode.BadGateway, mapOf("error" to "HSP API request failed"))
-    }
-
-    post("/hsp/metrics") {
-        if (!HspClient.isAvailable) return@post call.respond(HttpStatusCode.ServiceUnavailable, mapOf("error" to "HSP not configured on server"))
-        val json = call.jsonBody() ?: return@post
-        val fromLoc = json.text("from_loc")?.uppercase()
-        val fromDate = json.text("from_date")
-        if (fromLoc == null || fromDate == null) return@post call.badRequest("from_loc and from_date required")
-        call.respondMetrics(
-            HspMetricsRequest(
-                from_loc = fromLoc,
-                to_loc = json.text("to_loc")?.uppercase() ?: fromLoc,
-                from_time = json.text("from_time") ?: "0000",
-                to_time = json.text("to_time") ?: "2359",
-                from_date = fromDate,
-                to_date = json.text("to_date") ?: fromDate,
-                days = json.text("days") ?: HspClient.daysParam(fromDate)
-            )
-        )
-    }
-    get("/hsp/metrics/stream") {
-        if (!HspClient.isAvailable) return@get call.respond(HttpStatusCode.ServiceUnavailable, mapOf("error" to "HSP not configured"))
-        val from = call.parameters["from"]?.uppercase()?.trim()
-        val to = call.parameters["to"]?.uppercase()?.trim()
-        val date = call.parameters["date"]?.trim()
-        val fromTime = call.parameters["from_time"]?.trim() ?: "0000"
-        val toTime = call.parameters["to_time"]?.trim() ?: "2359"
-        if (from == null || to == null || date == null) return@get call.badRequest("from, to, date required")
-        call.respondMetrics(HspMetricsRequest(from, to, fromTime, toTime, date, date, HspClient.daysParam(date)))
-    }
-    // One service's history, with the units allocated to it.
-    post("/hsp/details") {
-        if (!HspClient.isAvailable) return@post call.respond(HttpStatusCode.ServiceUnavailable, mapOf("error" to "HSP not configured on server"))
-        val json = call.jsonBody() ?: return@post
-        val rid = json.text("rid")?.trim()
-        if (rid.isNullOrEmpty()) return@post call.badRequest("rid required")
-        val result = withContext(Dispatchers.IO) { HspClient.getDetails(rid) }
-            ?: return@post call.respond(HttpStatusCode.NotFound, mapOf("error" to "No HSP detail found for rid=$rid"))
-        val alloc = Allocations.byRid(rid)
-        call.respond(buildJsonObject {
-            put("rid", result.rid)
-            put("date", result.date)
-            put("tocCode", result.tocCode)
-            put("unit", alloc?.units?.firstOrNull() ?: "")
-            put("units", Json.encodeToJsonElement(alloc?.units ?: emptyList()))
-            put("vehicles", Json.encodeToJsonElement(alloc?.vehicles ?: emptyList()))
-            put("unitCount", alloc?.unitCount ?: 0)
-            put("locations", buildJsonArray {
-                for (loc in result.locations) {
-                    val tiploc = loc.tiploc.uppercase().trim()
-                    add(buildJsonObject {
-                        put("tiploc", tiploc)
-                        put("crs", tiploc)
-                        put("name", "")
-                        put("scheduledDep", loc.scheduledDep)
-                        put("scheduledArr", loc.scheduledArr)
-                        put("actualDep", loc.actualDep)
-                        put("actualArr", loc.actualArr)
-                        put("cancelReason", loc.cancelReason)
-                    })
-                }
-            })
-        })
     }
 }
 
