@@ -16,7 +16,6 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.Application
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.http.content.staticFiles
-import io.ktor.server.request.receiveText
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondText
 import io.ktor.server.routing.Route
@@ -31,8 +30,6 @@ import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.jsonObject
 import org.jetbrains.exposed.v1.core.Op
 import org.jetbrains.exposed.v1.core.ResultRow
 import org.jetbrains.exposed.v1.core.SortOrder
@@ -288,19 +285,6 @@ private fun Route.liveLocationRoutes() {
             }
         }
         call.respond(MovementsResponse(headcode, movements))
-    }
-}
-
-// ---- Historical Service Performance ----------------------------------------------------------------
-
-/** The JSON object body; responds 400 and returns null when it is not one. */
-private suspend fun ApplicationCall.jsonBody(): JsonObject? {
-    val text = receiveText()
-    return try {
-        Json.parseToJsonElement(text).jsonObject
-    } catch (e: Exception) {
-        badRequest("Invalid JSON body")
-        null
     }
 }
 
