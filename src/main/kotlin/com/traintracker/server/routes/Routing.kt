@@ -8,7 +8,7 @@ import com.traintracker.server.database.AppDatabase
 import com.traintracker.server.database.HeadcodeAliases
 import com.traintracker.server.database.Schedules
 import com.traintracker.server.database.TrainLocations
-import com.traintracker.server.database.TrustMovements
+import com.traintracker.server.database.Movements
 import com.traintracker.server.hsp.HspClient
 import com.traintracker.server.hsp.HspMetricsRequest
 import com.traintracker.server.kafka.TrainLocation
@@ -92,8 +92,8 @@ private fun Route.statusRoutes() {
     // Dates the board can show: from the oldest TRUST movement to the end of the timetable.
     get("/board-date-range") {
         val range = dbQuery {
-            val minEventTs = TrustMovements.eventTs.min()
-            val minDate = TrustMovements.select(minEventTs).singleOrNull()?.get(minEventTs)?.toLocalDate()?.toString()
+            val minEventTs = Movements.eventTs.min()
+            val minDate = Movements.select(minEventTs).singleOrNull()?.get(minEventTs)?.toLocalDate()?.toString()
             val maxScheduleEnd = Schedules.scheduleEndDate.max()
             val maxDate = Schedules.select(maxScheduleEnd).where { Schedules.stpIndicator eq 'P' }.singleOrNull()?.get(maxScheduleEnd)
             BoardDateRangeResponse(minDate ?: "2026-01-01", maxDate ?: "2026-12-31")
@@ -280,18 +280,18 @@ private fun Route.trustRoutes() {
         val safeHc = headcode.filter { it.isLetterOrDigit() }
         val safeUid = (call.parameters["uid"]?.uppercase()?.trim() ?: "").filter { it.isLetterOrDigit() }
         val movements = dbQuery {
-            TrustMovements.selectAll().where {
-                (TrustMovements.headcode eq safeHc) and
-                    (if (safeUid.isNotEmpty()) TrustMovements.uid eq safeUid else Op.TRUE) and
-                    (TrustMovements.eventTs greaterEq LocalDateTime.now().minusHours(3))
-            }.orderBy(TrustMovements.eventTs, SortOrder.DESC).limit(50).map { row ->
+            Movements.selectAll().where {
+                (Movements.headcode eq safeHc) and
+                    (if (safeUid.isNotEmpty()) Movements.uid eq safeUid else Op.TRUE) and
+                    (Movements.eventTs greaterEq LocalDateTime.now().minusHours(3))
+            }.orderBy(Movements.eventTs, SortOrder.DESC).limit(50).map { row ->
                 MovementResponse(
-                    crs = row[TrustMovements.crs] ?: row[TrustMovements.stanox],
-                    eventType = row[TrustMovements.eventType],
-                    scheduledTime = row[TrustMovements.scheduledTime] ?: "",
-                    actualTime = row[TrustMovements.actualTime] ?: "",
-                    platform = row[TrustMovements.platform] ?: "",
-                    isCancelled = row[TrustMovements.isCancelled]
+                    crs = row[Movements.crs] ?: row[Movements.stanox],
+                    eventType = row[Movements.eventType],
+                    scheduledTime = row[Movements.scheduledTime] ?: "",
+                    actualTime = row[Movements.actualTime] ?: "",
+                    platform = row[Movements.platform] ?: "",
+                    isCancelled = row[Movements.isCancelled]
                 )
             }
         }

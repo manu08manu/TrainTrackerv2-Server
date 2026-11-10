@@ -37,7 +37,7 @@ object Schedules : Table("schedules") {
     }
 }
 
-object TrustMovements : Table("trust_movements") {
+object Movements : Table("movements") {
     val headcode = varchar("headcode", 4)
     val trainId = varchar("train_id", 10)
     val uid = varchar("uid", 6).default("")
