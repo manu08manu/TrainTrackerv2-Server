@@ -69,9 +69,9 @@ object ScheduleCancellations {
         return windows.any { it.covers(d) }
     }
 
-    /** TRUST wins: cancelled if TRUST says so, running if TRUST has an actual time, else the timetable decides. */
-    fun effectiveCancelled(uid: String, date: String, trustCancelled: Boolean, hasActualTime: Boolean): Boolean {
-        if (trustCancelled) return true
+    /** Movements win: cancelled if one says so, running if one has an actual time, else the timetable decides. */
+    fun effectiveCancelled(uid: String, date: String, reportedCancelled: Boolean, hasActualTime: Boolean): Boolean {
+        if (reportedCancelled) return true
         if (hasActualTime) return false
         return isCancelled(uid, date)
     }

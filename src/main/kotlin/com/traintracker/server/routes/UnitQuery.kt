@@ -133,11 +133,11 @@ internal fun queryByUnit(unit: String, date: String = LocalDate.now().toString()
 
     val allUids = (workings.map { it.loRow[Schedules.uid] } + partnerUids).toSet()
     val darwinDb = AppDatabase.darwinPlatforms(allUids)
-    val trustPlatforms = AppDatabase.trustPlatforms(allUids)
+    val movementPlatforms = AppDatabase.movementPlatforms(allUids)
     fun service(loRow: ResultRow, headcode: String, units: List<String>, vehicles: List<String>): ServiceResponse {
         val uid = loRow[Schedules.uid]
         val (platform, confirmed) = resolvePlatform(
-            uid, loRow[Schedules.tiploc], loRow[Schedules.crs], loRow[Schedules.platform], darwinDb[uid to loRow[Schedules.tiploc]], trustPlatforms
+            uid, loRow[Schedules.tiploc], loRow[Schedules.crs], loRow[Schedules.platform], darwinDb[uid to loRow[Schedules.tiploc]], movementPlatforms
         )
         return ServiceResponse(
             uid = uid,

@@ -54,7 +54,7 @@ data class AssociationRecord(
 
 data class ActivationInfo(val updatedAt: String, val originStanox: String?)
 
-/** Latest TRUST activation of each uid on the service day [date]. */
+/** Latest activation of each uid on the service day [date]. */
 fun JdbcTransaction.activationsFor(uids: Collection<String>, date: String): Map<String, ActivationInfo> {
     val result = mutableMapOf<String, ActivationInfo>()
     uids.chunked(500).forEach { chunk ->
@@ -119,7 +119,7 @@ object AppDatabase {
         }
     }
 
-    // ---- TRUST ---------------------------------------------------------------------------------------
+    // ---- Movements ------------------------------------------------------------------------------------
 
     fun batchUpsertMovements(movements: List<MovementBatch>) {
         if (movements.isEmpty()) return
@@ -156,7 +156,7 @@ object AppDatabase {
         }
     }
 
-    /** Moves a train's last known location to its new headcode after a TRUST change of identity. */
+    /** Moves a train's last known location to its new headcode after a change of identity. */
     fun transferLocation(oldHeadcode: String, newHeadcode: String, rid: String) {
         transaction {
             val existing = TrainLocations.selectAll()
@@ -212,7 +212,7 @@ object AppDatabase {
         emptyMap()
     }
 
-    /** uids that TRUST activated on the service day [date]. */
+    /** uids activated on the service day [date]. */
     fun activatedUids(uids: Collection<String>, date: String): Set<String> {
         if (uids.isEmpty()) return emptySet()
         return try {
@@ -227,8 +227,8 @@ object AppDatabase {
         }
     }
 
-    /** (uid, CRS) -> platform from TRUST movements of the last 12 hours; the latest report wins. */
-    fun trustPlatforms(uids: Collection<String>): Map<Pair<String, String>, String> {
+    /** (uid, CRS) -> platform from movements of the last 12 hours; the latest report wins. */
+    fun movementPlatforms(uids: Collection<String>): Map<Pair<String, String>, String> {
         if (uids.isEmpty()) return emptyMap()
         return try {
             transaction {
@@ -426,10 +426,10 @@ object AppDatabase {
 
     // ---- Status --------------------------------------------------------------------------------------
 
-    fun status(trustConnected: Boolean, trainLocCount: Int): StatusResponse {
+    fun status(linxConnected: Boolean, trainLocCount: Int): StatusResponse {
         statusCache?.let { (at, cached) ->
             if (System.currentTimeMillis() - at < 30_000L) {
-                return cached.copy(trustConnected = trustConnected, trainLocationsCount = trainLocCount)
+                return cached.copy(linxConnected = linxConnected, trainLocationsCount = trainLocCount)
             }
         }
         val cifDate = getCifMeta("last_download_date")
@@ -437,12 +437,12 @@ object AppDatabase {
         val resp = transaction {
             StatusResponse(
                 cifLastDownload = cifDate,
-                trustConnected = trustConnected,
+                linxConnected = linxConnected,
                 trainLocationsCount = trainLocCount,
                 scheduleCount = count("SELECT COUNT(*) FROM schedules"),
                 uniqueServiceCount = count("SELECT COUNT(DISTINCT uid) FROM schedules"),
-                trustMovementCount = count("SELECT COUNT(*) FROM movements"),
-                trustMovementCount24h = Movements.selectAll()
+                movementCount = count("SELECT COUNT(*) FROM movements"),
+                movementCount24h = Movements.selectAll()
                     .where { Movements.eventTs greaterEq LocalDateTime.now().minusHours(24L) }.count().toInt(),
                 allocationsToday = count("SELECT COUNT(DISTINCT headcode) FROM allocation_history WHERE service_date=?", listOf(today)),
                 allocationRecords = AllocationConsists.selectAll().count().toInt(),

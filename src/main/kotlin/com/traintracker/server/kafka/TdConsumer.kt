@@ -16,7 +16,7 @@ private val log = LoggerFactory.getLogger("TdConsumer")
 
 /**
  * Train describer feed. Berth steps (CA) of headcode-described trains are resolved through SMART to STANOX
- * events, which are stored (TdStore) and compared with TRUST (TdCorrelator). CC messages are only counted.
+ * events, which are stored (TdStore) and compared with the reported movements (TdCorrelator). CC messages are only counted.
  * Resolution statistics are logged once a minute.
  */
 object TdConsumer {

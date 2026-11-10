@@ -312,7 +312,7 @@ private fun JdbcTransaction.permanentFallbacks(uids: Set<String>, safeCrs: Strin
     }
 }
 
-/** Builds the board rows: TRUST actual or predicted times, cancellations, platforms, origin and destination. */
+/** Builds the board rows: reported actual or predicted times, cancellations, platforms, origin and destination. */
 private fun JdbcTransaction.boardServices(
     rows: List<ResultRow>,
     crs: String,
@@ -324,8 +324,8 @@ private fun JdbcTransaction.boardServices(
     val safeCrs = crs.filter { it.isLetterOrDigit() }
     val uids = rows.map { it[Schedules.uid] }.toSet()
     // "uid|scheduled time" -> latest (actual time, cancelled, reason); "uid" -> latest cancellation
-    val trust = mutableMapOf<String, Triple<String, Boolean, String?>>()
-    val trustReasonCode = mutableMapOf<String, String?>()
+    val moves = mutableMapOf<String, Triple<String, Boolean, String?>>()
+    val moveReasons = mutableMapOf<String, String?>()
     val lastDelay = mutableMapOf<String, Int>()   // uid -> minutes late at its latest reported call
     val running = mutableSetOf<String>()          // uids with any reported (not cancelled) movement
     if (uids.isNotEmpty()) {
@@ -353,12 +353,12 @@ private fun JdbcTransaction.boardServices(
                     val reasonCode = rs.getString("cancel_reason")
                     val entry = Triple(actualTime, isCancelled, ReasonCodes.resolve(reasonCode))
                     val stopKey = "$uid|$scht"
-                    trust.putIfAbsent(stopKey, entry)
-                    if (!trustReasonCode.containsKey(stopKey)) trustReasonCode[stopKey] = reasonCode
+                    moves.putIfAbsent(stopKey, entry)
+                    if (!moveReasons.containsKey(stopKey)) moveReasons[stopKey] = reasonCode
                     // A change-of-origin cancellation cancels its own stop only, not the rest of the run.
                     if (isCancelled && rs.getString("event_type") != LinxMovementWriter.COO_CANCELLATION) {
-                        trust.putIfAbsent(uid, entry)
-                        if (!trustReasonCode.containsKey(uid)) trustReasonCode[uid] = reasonCode
+                        moves.putIfAbsent(uid, entry)
+                        if (!moveReasons.containsKey(uid)) moveReasons[uid] = reasonCode
                     }
                     if (!isCancelled && actualTime.isNotEmpty()) running += uid
                     if (!isCancelled && actualTime.isNotEmpty() && uid !in lastDelay) {
@@ -372,25 +372,25 @@ private fun JdbcTransaction.boardServices(
     }
     val overrides = originDestOverrides(uids, date)
     val darwinDb = AppDatabase.darwinPlatforms(uids)
-    val trustPlatforms = AppDatabase.trustPlatforms(uids)
+    val movementPlatforms = AppDatabase.movementPlatforms(uids)
     val activatedUids = AppDatabase.activatedUids(uids, date)
     val services = rows.mapNotNull { row ->
         val uid = row[Schedules.uid]
         val scht = row[Schedules.scheduledTime]
         val stopKey = "$uid|$scht"
-        val stopEntry = trust[stopKey]
-        val uidCancel = trust[uid]?.takeIf { it.second }
+        val stopEntry = moves[stopKey]
+        val uidCancel = moves[uid]?.takeIf { it.second }
         val cancelEntry = stopEntry ?: uidCancel
         val cancelReasonCode = when {
-            stopEntry != null -> trustReasonCode[stopKey]
-            uidCancel != null -> trustReasonCode[uid]
+            stopEntry != null -> moveReasons[stopKey]
+            uidCancel != null -> moveReasons[uid]
             else -> null
         }
         val actualTime = stopEntry?.first ?: ""
-        val trustCancelled = (cancelEntry?.second ?: false) || row[Schedules.stpIndicator] == 'C'
-        val timetableCancelled = !trustCancelled && actualTime.isEmpty() && uid !in lastDelay &&
+        val reportedCancelled = (cancelEntry?.second ?: false) || row[Schedules.stpIndicator] == 'C'
+        val timetableCancelled = !reportedCancelled && actualTime.isEmpty() && uid !in lastDelay &&
             ScheduleCancellations.isCancelled(uid, date)
-        val isCancelled = trustCancelled || timetableCancelled
+        val isCancelled = reportedCancelled || timetableCancelled
         // Planned cancellations (PG/PD) and trains not activated today are left off departure and arrival boards.
         if (mode != BoardMode.ALL && ((isCancelled && cancelReasonCode in setOf("PG", "PD")) || uid !in activatedUids)) {
             return@mapNotNull null
@@ -398,7 +398,7 @@ private fun JdbcTransaction.boardServices(
         val delay = lastDelay[uid]
         val predicted = actualTime.isEmpty() && !isCancelled && delay != null && delay > 0
         val (platform, confirmed) = resolvePlatform(
-            uid, row[Schedules.tiploc], row[Schedules.crs], row[Schedules.platform], darwinDb[uid to row[Schedules.tiploc]], trustPlatforms
+            uid, row[Schedules.tiploc], row[Schedules.crs], row[Schedules.platform], darwinDb[uid to row[Schedules.tiploc]], movementPlatforms
         )
         val (originTiploc, originCrs) = overrides.origin(row)
         val (destTiploc, destCrs) = overrides.dest(row)

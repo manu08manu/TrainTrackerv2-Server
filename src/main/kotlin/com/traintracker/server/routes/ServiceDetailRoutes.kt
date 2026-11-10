@@ -28,8 +28,8 @@ import org.jetbrains.exposed.v1.core.eq
 import org.jetbrains.exposed.v1.jdbc.JdbcTransaction
 import org.jetbrains.exposed.v1.jdbc.selectAll
 
-/** TRUST reports some stations under a different CRS from the timetable. */
-private val TRUST_CRS_ALIASES = mapOf("PDX" to "PAD", "FDX" to "FOG", "LSX" to "LST", "ABX" to "ABW", "WHX" to "WWC")
+/** Movements report some stations under a different CRS from the timetable. */
+private val MOVEMENT_CRS_ALIASES = mapOf("PDX" to "PAD", "FDX" to "FOG", "LSX" to "LST", "ABX" to "ABW", "WHX" to "WWC")
 
 /** A service's route as built from the timetable and live data. */
 private class ServiceRoute(
@@ -40,11 +40,11 @@ private class ServiceRoute(
 )
 
 /**
- * TRUST (and TD) times for one service, keyed by scheduled time and by "CRS|scheduled time":
+ * Reported (and TD) times for one service, keyed by scheduled time and by "CRS|scheduled time":
  * [latest] is (actual time, cancelled, reason) merged over all events; the others are the first arrival and
  * departure times seen, newest first, with seconds when TD supplied them.
  */
-private class TrustTimes {
+private class MovementTimes {
     val latest = mutableMapOf<String, Triple<String, Boolean, String?>>()
     val arrivals = mutableMapOf<String, String>()
     val departures = mutableMapOf<String, String>()
@@ -179,32 +179,32 @@ private fun JdbcTransaction.serviceRoute(uid: String, atCrs: String, svcDate: St
     val firstRow = rows.firstOrNull()
     val tocCode = firstRow?.let { CorpusLookup.operatorForTsc(it[Schedules.tsc]) } ?: ""
     firstRow?.let { CorpusLookup.recordMissingTscIfNoOverride(it[Schedules.tsc], headcode, uid) }
-    val trust = if (headcode.any { it.isLetterOrDigit() }) trustTimes(uid, svcDate, tdOverlay) else TrustTimes()
+    val moves = if (headcode.any { it.isLetterOrDigit() }) movementTimes(uid, svcDate, tdOverlay) else MovementTimes()
 
     val tiplocs = rows.map { it[Schedules.tiploc] }.toSet()
     val tiplocNames = CorpusLookup.namesFromTiplocs(tiplocs)
     CorpusLookup.recordMissingFromNames(tiplocs, headcode, uid)
 
     val darwinDb = AppDatabase.darwinPlatforms(uid, tiplocs)
-    val trustPlatforms = AppDatabase.trustPlatforms(listOf(uid))
-    val ttCancelled = timetableCancelled && trust.arrivals.isEmpty() && trust.departures.isEmpty()
+    val movementPlatforms = AppDatabase.movementPlatforms(listOf(uid))
+    val ttCancelled = timetableCancelled && moves.arrivals.isEmpty() && moves.departures.isEmpty()
     val cps = rows.map { row ->
         val tiploc = row[Schedules.tiploc]
         val crs = row[Schedules.crs]?.takeIf { it.isNotEmpty() } ?: CorpusLookup.crsFromTiploc(tiploc)
         val scht = row[Schedules.scheduledTime]
         val schedArr = row[Schedules.scheduledArrival]
         val schedDep = row[Schedules.scheduledDeparture]
-        val trustEntry = trust.latest[scht] ?: crs?.let { trust.latest["$it|$scht"] }
+        val exactMove = moves.latest[scht] ?: crs?.let { moves.latest["$it|$scht"] }
         // No exact match: the nearest report here (arrival at the terminus, departure elsewhere).
         val terminus = row[Schedules.stopType] == "LT"
-        val near = if (trustEntry == null) {
-            trust.nearest(crs, if (terminus) schedArr ?: scht else schedDep ?: scht, if (terminus) "ARRIVAL" else "DEPARTURE")
+        val near = if (exactMove == null) {
+            moves.nearest(crs, if (terminus) schedArr ?: scht else schedDep ?: scht, if (terminus) "ARRIVAL" else "DEPARTURE")
         } else {
             null
         }
         val nearArr = near?.takeIf { it.eventType == "ARRIVAL" }
         val nearDep = near?.takeIf { it.eventType == "DEPARTURE" }
-        val (platform, confirmed) = resolvePlatform(uid, tiploc, crs, row[Schedules.platform], darwinDb[tiploc], trustPlatforms)
+        val (platform, confirmed) = resolvePlatform(uid, tiploc, crs, row[Schedules.platform], darwinDb[tiploc], movementPlatforms)
         CallingPointResponse(
             tiploc,
             crs,
@@ -217,20 +217,20 @@ private fun JdbcTransaction.serviceRoute(uid: String, atCrs: String, svcDate: St
             row[Schedules.platform],
             row[Schedules.isPass],
             row[Schedules.stopType],
-            trustEntry?.first ?: near?.actual ?: "",
-            trust.arrivals.at(schedArr, crs) ?: nearArr?.actual ?: "",
-            trust.departures.at(schedDep, crs) ?: trust.departures.at(scht, crs) ?: nearDep?.actual ?: "",
-            trust.arrivalSecs.at(schedArr, crs) ?: nearArr?.actualSec ?: "",
-            trust.departureSecs.at(schedDep, crs) ?: trust.departureSecs.at(scht, crs) ?: nearDep?.actualSec ?: "",
-            (trustEntry?.second ?: false) || ttCancelled,
-            trustEntry?.third ?: if (ttCancelled) TIMETABLE_CANCELLED else null
+            exactMove?.first ?: near?.actual ?: "",
+            moves.arrivals.at(schedArr, crs) ?: nearArr?.actual ?: "",
+            moves.departures.at(schedDep, crs) ?: moves.departures.at(scht, crs) ?: nearDep?.actual ?: "",
+            moves.arrivalSecs.at(schedArr, crs) ?: nearArr?.actualSec ?: "",
+            moves.departureSecs.at(schedDep, crs) ?: moves.departureSecs.at(scht, crs) ?: nearDep?.actualSec ?: "",
+            (exactMove?.second ?: false) || ttCancelled,
+            exactMove?.third ?: if (ttCancelled) TIMETABLE_CANCELLED else null
         )
     }
     val spread = applyCancellations(cps) { cp ->
-        cp.scheduledTime in trust.changeOfOriginKeys || "${cp.crs}|${cp.scheduledTime}" in trust.changeOfOriginKeys
+        cp.scheduledTime in moves.changeOfOriginKeys || "${cp.crs}|${cp.scheduledTime}" in moves.changeOfOriginKeys
     }
     // Calls matched to the nearest report count as reported, so later estimates build on them.
-    val reportedKeys = trust.latest.keys + spread.filter { it.actualTime.isNotEmpty() && !it.isPredicted }.map { it.effectiveTime() }
+    val reportedKeys = moves.latest.keys + spread.filter { it.actualTime.isNotEmpty() && !it.isPredicted }.map { it.effectiveTime() }
     val projected = projectDelays(spread, reportedKeys)
     val loTime = projected.firstOrNull { it.stopType == "LO" }?.effectiveTime() ?: "00:00"
     val ltTime = projected.firstOrNull { it.stopType == "LT" }?.effectiveTime() ?: "23:59"
@@ -335,9 +335,9 @@ private fun trimToDestination(rows: List<ResultRow>): List<ResultRow> {
     return if (finalIdx >= 0) deduped.subList(0, finalIdx + 1) else deduped
 }
 
-/** TRUST events for the service day, with TD times (to the second) where they match. */
-private fun JdbcTransaction.trustTimes(uid: String, svcDate: String, tdOverlay: TdOverlay): TrustTimes {
-    val times = TrustTimes()
+/** Movements for the service day, with TD times (to the second) where they match. */
+private fun JdbcTransaction.movementTimes(uid: String, svcDate: String, tdOverlay: TdOverlay): MovementTimes {
+    val times = MovementTimes()
     // When a train ID has only cancellations, use that train ID's events alone.
     val cancelledOnlyTrainId = queryFirst(
         "SELECT train_id FROM movements WHERE uid=? AND ${serviceDaySql("event_ts")} GROUP BY train_id HAVING $CANCELLED_ONLY_SQL LIMIT 1",
@@ -356,8 +356,8 @@ private fun JdbcTransaction.trustTimes(uid: String, svcDate: String, tdOverlay: 
             val actual = td?.minute ?: rs.getString("actual_time") ?: ""
             val actualSec = td?.seconds ?: ""
             val crs = (rs.getString("crs")?.takeIf { it.isNotEmpty() } ?: CorpusLookup.crsFromStanox(rs.getString("stanox") ?: ""))
-                ?.let { TRUST_CRS_ALIASES[it] ?: it }
-            if (crs != null) times.reports += TrustTimes.Report(crs, scht, actual, actualSec, eventType, isCancelled, cancelReason)
+                ?.let { MOVEMENT_CRS_ALIASES[it] ?: it }
+            if (crs != null) times.reports += MovementTimes.Report(crs, scht, actual, actualSec, eventType, isCancelled, cancelReason)
             for (key in listOfNotNull(scht, crs?.let { "$it|$scht" })) {
                 if (eventType == LinxMovementWriter.COO_CANCELLATION) times.changeOfOriginKeys += key
                 val existing = times.latest[key]
@@ -441,12 +441,12 @@ internal fun propagateCancellations(raw: List<CallingPointResponse>): List<Calli
     }
 }
 
-/** Calls after the latest TRUST-confirmed delay, still without an actual time, get a predicted time. */
-private fun projectDelays(cps: List<CallingPointResponse>, trustKeys: Set<String>): List<CallingPointResponse> {
+/** Calls after the latest reported delay, still without an actual time, get a predicted time. */
+private fun projectDelays(cps: List<CallingPointResponse>, reportedKeys: Set<String>): List<CallingPointResponse> {
     var lastDelay = 0
     var lastReason: String? = null
     return cps.map { cp ->
-        if (cp.actualTime.isNotEmpty() && cp.effectiveTime() in trustKeys) {
+        if (cp.actualTime.isNotEmpty() && cp.effectiveTime() in reportedKeys) {
             val late = minutesLate(cp.actualTime, cp.effectiveTime())
             if (late >= 0) {
                 lastDelay = late

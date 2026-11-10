@@ -18,9 +18,9 @@ object TdCorrelator {
     private val agree = AtomicLong()
     private val disagree = AtomicLong()
     private val tdOnly = AtomicLong()
-    private val trustOnly = AtomicLong()
+    private val movementOnly = AtomicLong()
     private val disagreeSamples = ConcurrentLinkedQueue<String>()
-    private val trustOnlySamples = ConcurrentLinkedQueue<String>()
+    private val movementOnlySamples = ConcurrentLinkedQueue<String>()
 
     fun onTd(headcode: String, e: SmartEntry, stepMs: Long) {
         val off = e.offsetSec ?: return
@@ -35,7 +35,7 @@ object TdCorrelator {
         meet("$headcode|${e.stanox}|$type", true, minute, exact)
     }
 
-    fun onTrust(headcode: String, stanox: String, type: String, minute: String) {
+    fun onMovement(headcode: String, stanox: String, type: String, minute: String) {
         meet("$headcode|$stanox|$type", false, minute, 0L)
     }
 
@@ -45,14 +45,14 @@ object TdCorrelator {
         if (other != null) {
             if (other.fromTd != fromTd && now - other.at < TTL_MS) {
                 val tdMinute = if (fromTd) minute else other.minute
-                val trustMinute = if (fromTd) other.minute else minute
-                if (tdMinute == trustMinute) {
+                val movementMinute = if (fromTd) other.minute else minute
+                if (tdMinute == movementMinute) {
                     agree.incrementAndGet()
                 } else {
                     disagree.incrementAndGet()
                     if (disagreeSamples.size < MAX_SAMPLES) {
                         val tdExact = if (fromTd) exactMs else other.exactMs
-                        disagreeSamples.add("$key td=${Instant.ofEpochMilli(tdExact).atZone(LONDON).format(HMS)} trust=$trustMinute")
+                        disagreeSamples.add("$key td=${Instant.ofEpochMilli(tdExact).atZone(LONDON).format(HMS)} move=$movementMinute")
                     }
                 }
                 return
@@ -66,8 +66,8 @@ object TdCorrelator {
         if (p.fromTd) {
             tdOnly.incrementAndGet()
         } else {
-            trustOnly.incrementAndGet()
-            if (trustOnlySamples.size < MAX_SAMPLES) trustOnlySamples.add(key)
+            movementOnly.incrementAndGet()
+            if (movementOnlySamples.size < MAX_SAMPLES) movementOnlySamples.add(key)
         }
     }
 
@@ -90,11 +90,11 @@ object TdCorrelator {
         val a = agree.getAndSet(0L)
         val d = disagree.getAndSet(0L)
         val t = tdOnly.getAndSet(0L)
-        val r = trustOnly.getAndSet(0L)
+        val r = movementOnly.getAndSet(0L)
         val pct = if (a + d > 0L) a * 100 / (a + d) else 0L
-        val sb = StringBuilder("TD/TRUST minute check: agree=$a disagree=$d ($pct% agree) tdOnlyExpired=$t trustOnlyExpired=$r pending=${pending.size}")
+        val sb = StringBuilder("TD/movement minute check: agree=$a disagree=$d ($pct% agree) tdOnlyExpired=$t movementOnlyExpired=$r pending=${pending.size}")
         drain(disagreeSamples)?.let { sb.append(" | disagree: ").append(it) }
-        drain(trustOnlySamples)?.let { sb.append(" | trustOnly: ").append(it) }
+        drain(movementOnlySamples)?.let { sb.append(" | movementOnly: ").append(it) }
         return sb.toString()
     }
 
