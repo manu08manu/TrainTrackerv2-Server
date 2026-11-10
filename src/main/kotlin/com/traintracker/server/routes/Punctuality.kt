@@ -428,6 +428,12 @@ internal object League {
     val PERIODS = setOf(1, 7, 30)
     private const val MIN_SCORED_PER_DAY = 35
 
+    /**
+     * Not ranked. London Underground is only in the data for the Bakerloo's Queens Park-Harrow section, where
+     * most of its cancellations are Tube-side (reason TX: two in three trains all day on some Sundays).
+     */
+    private val NOT_RANKED = listOf("LT")
+
     fun table(days: Int, from: String, to: String): LeagueResponse = transaction {
         val dates = queryList("SELECT date FROM punctuality_days ORDER BY date DESC LIMIT ?", listOf(days.toString())) { it.getString(1) }
         val window = Punctuality.SlotWindow(from, to)
@@ -436,8 +442,9 @@ internal object League {
         if (dates.isNotEmpty()) {
             query(
                 "SELECT toc, ${PunctualityCounts.SUMS} FROM punctuality_daily " +
-                    "WHERE toc != '' AND date IN (${placeholders(dates.size)}) AND ${window.sql} GROUP BY toc",
-                dates + window.args
+                    "WHERE toc != '' AND toc NOT IN (${placeholders(NOT_RANKED.size)}) AND date IN (${placeholders(dates.size)}) " +
+                    "AND ${window.sql} GROUP BY toc",
+                NOT_RANKED + dates + window.args
             ) { rs ->
                 while (rs.next()) {
                     val toc = rs.getString(1)
