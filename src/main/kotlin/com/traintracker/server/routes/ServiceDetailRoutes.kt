@@ -42,6 +42,8 @@ private class ServiceRoute(
     val movedOrigin: String? = null,
     /** The 95's reason, as shown. */
     val movedOriginReason: String? = null,
+    /** TIPLOC the train now ends at after being cut short to a changed location (code 93), else null. */
+    val movedDestination: String? = null,
 )
 
 /**
@@ -152,6 +154,7 @@ fun Route.serviceDetailRoutes() {
                 nextWorkingAll = nextWorkings.map { StockNeighbourCandidate(it.first, it.second, it.third) },
                 activatedAt = activation?.updatedAt?.let { toIsoUtc(it) },
                 activationOrigin = route.movedOrigin ?: activation?.originStanox?.let { CorpusLookup.tiplocFromStanox(it) },
+                movedDestination = route.movedDestination,
                 legs = legData.groups.map { g ->
                     UnitLegResponse(
                         g.fromTiploc,
@@ -187,8 +190,8 @@ private fun JdbcTransaction.serviceRoute(uid: String, atCrs: String, svcDate: St
     firstRow?.let { CorpusLookup.recordMissingTscIfNoOverride(it[Schedules.tsc], headcode, uid) }
     val moves = if (headcode.any { it.isLetterOrDigit() }) movementTimes(uid, svcDate, tdOverlay) else MovementTimes()
 
-    val (changes, movedOrigin, movedOriginReason) = locationChanges(uid, svcDate)
-    val tiplocs = rows.map { it[Schedules.tiploc] }.toSet() + changes.values
+    val (changes, movedOrigin, movedOriginReason, cutShort) = locationChanges(uid, svcDate)
+    val tiplocs = rows.map { it[Schedules.tiploc] }.toSet() + changes.values + listOfNotNull(cutShort?.to)
     val tiplocNames = CorpusLookup.namesFromTiplocs(tiplocs)
     CorpusLookup.recordMissingFromNames(tiplocs, headcode, uid)
 
@@ -237,7 +240,7 @@ private fun JdbcTransaction.serviceRoute(uid: String, atCrs: String, svcDate: St
             replaces = if (tiploc != booked) tiplocNames[booked] ?: booked else null,
         )
     }
-    val spread = applyCancellations(cps) { cp ->
+    val spread = applyCancellations(cutShort?.let { endShort(cps, it, tiplocNames, moves) } ?: cps) { cp ->
         cp.scheduledTime in moves.changeOfOriginKeys || "${cp.crs}|${cp.scheduledTime}" in moves.changeOfOriginKeys
     }
     // Calls matched to the nearest report count as reported, so later estimates build on them.
@@ -246,7 +249,8 @@ private fun JdbcTransaction.serviceRoute(uid: String, atCrs: String, svcDate: St
     val loTime = projected.firstOrNull { it.stopType == "LO" }?.effectiveTime() ?: "00:00"
     val ltTime = projected.firstOrNull { it.stopType == "LT" }?.effectiveTime() ?: "23:59"
     val ordered = if (loTime > ltTime) projected.sortedFromClock(loTime) { it.effectiveTime() } else projected
-    return ServiceRoute(headcode, tocCode, tiplocNames, RoutePoints.followChangedLocations(RoutePoints.merge(ordered, uid, svcDate, headcode), uid, svcDate, headcode), movedOrigin, movedOriginReason)
+    val withPoints = RoutePoints.followChangedLocations(RoutePoints.merge(ordered, uid, svcDate, headcode), uid, svcDate, headcode)
+    return ServiceRoute(headcode, tocCode, tiplocNames, withPoints, movedOrigin, movedOriginReason, cutShort?.to)
 }
 
 /**
@@ -353,17 +357,29 @@ private fun trimToDestination(rows: List<ResultRow>): List<ResultRow> {
  *    first of the pair is booked TIPLOC -> TIPLOC used instead (9H08: West Drayton instead of Heathrow T2 & 3).
  *  - 95 at a booked location means the train now starts from its replacement ([LocationChanges.movedOrigin]):
  *    9H08 terminated at West Drayton, so 9U27, which it forms, started there instead of Heathrow.
+ *  - 93 at a booked location, with a 04 elsewhere in the message, means the train no longer calls there or
+ *    beyond and ends at the 04 location instead ([LocationChanges.cutShort]): 9C58, booked to West Croydon,
+ *    went from Sydenham to Crystal Palace instead of Penge West onwards.
  * A later message for the same location wins.
  */
-private data class LocationChanges(val replaced: Map<String, String>, val movedOrigin: String?, val movedOriginReason: String?)
+private data class LocationChanges(
+    val replaced: Map<String, String>,
+    val movedOrigin: String?,
+    val movedOriginReason: String?,
+    val cutShort: CutShort?,
+)
+
+/** Code 93: no calls from booked TIPLOC [from] onwards; the train ends at [to], due at [time] (HH:MM). */
+private data class CutShort(val from: String, val to: String, val time: String, val reason: String?)
 
 private fun JdbcTransaction.locationChanges(uid: String, svcDate: String): LocationChanges {
     val replaced = mutableMapOf<String, String>()
     var startMovedFrom: String? = null
     var startMovedTo: String? = null
     var startMovedReason: String? = null
+    var cutShort: CutShort? = null
     val messages = queryList(
-        "SELECT locations, reason FROM linx_modifications WHERE uid = ? AND start_date = ? AND code IN ('06', '95') AND locations IS NOT NULL ORDER BY id",
+        "SELECT locations, reason FROM linx_modifications WHERE uid = ? AND start_date = ? AND code IN ('06', '93', '95') AND locations IS NOT NULL ORDER BY id",
         listOf(uid, svcDate)
     ) { it.getString(1) to it.getString(2) }
     for ((message, reason) in messages) {
@@ -375,9 +391,35 @@ private fun JdbcTransaction.locationChanges(uid: String, svcDate: String): Locat
             startMovedTo = marked("04").firstOrNull()
             startMovedReason = ReasonCodes.resolve(reason)
         }
+        val cutFrom = marked("93").firstOrNull()
+        val end = entries.firstOrNull { it[1] == "04" }
+        if (cutFrom != null && end != null) {
+            cutShort = CutShort(cutFrom, end[0], end.getOrNull(3)?.take(5) ?: "", ReasonCodes.resolve(reason))
+        }
     }
     val movedOrigin = startMovedFrom?.let { from -> startMovedTo ?: replaced[from] }
-    return LocationChanges(replaced, movedOrigin, startMovedReason.takeIf { movedOrigin != null })
+    return LocationChanges(replaced, movedOrigin, startMovedReason.takeIf { movedOrigin != null }, cutShort)
+}
+
+/**
+ * A train cut short to a changed location ([cut], code 93): the calls from the dropped one onwards are cancelled
+ * with the 93's reason, and the new end is added before them, matched to its reports by location.
+ */
+private fun endShort(cps: List<CallingPointResponse>, cut: CutShort, names: Map<String, String?>, moves: MovementTimes): List<CallingPointResponse> {
+    val k = cps.indexOfFirst { it.tiploc == cut.from }
+    if (k <= 0 || cps.any { it.tiploc == cut.to }) return cps
+    val crs = CorpusLookup.crsFromTiploc(cut.to)
+    val arrived = moves.nearest(crs, cut.time, "ARRIVAL")?.takeIf { it.eventType == "ARRIVAL" }
+    val end = CallingPointResponse(
+        tiploc = cut.to, crs = crs, name = names[cut.to], scheduledTime = cut.time, scheduledArrival = cut.time,
+        platform = null, isPass = false, stopType = "LT",
+        actualTime = arrived?.actual ?: "", actualArrival = arrived?.actual ?: "", actualArrivalSec = arrived?.actualSec ?: "",
+        replaces = cps.lastOrNull { it.stopType == "LT" }?.let { it.name ?: it.tiploc },
+    )
+    val cancelled = cps.subList(k, cps.size).map {
+        if (it.actualTime.isEmpty()) it.copy(isCancelled = true, cancelReason = it.cancelReason ?: cut.reason) else it
+    }
+    return cps.subList(0, k) + end + cancelled
 }
 
 /** Movements for the service day, with TD times (to the second) where they match. */

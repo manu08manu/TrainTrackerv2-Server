@@ -2,15 +2,19 @@ package com.traintracker.server.routes
 
 import com.traintracker.server.cif.CorpusLookup
 import com.traintracker.server.cif.ScheduleCancellations
+import com.traintracker.server.database.AppDatabase
 import com.traintracker.server.database.SCHEDULE_DATE_SCOPE_SQL
 import com.traintracker.server.database.activationsFor
 import com.traintracker.server.database.execUpdate
+import com.traintracker.server.database.placeholders
 import com.traintracker.server.database.query
 import com.traintracker.server.database.queryFirst
+import com.traintracker.server.database.queryList
 import com.traintracker.server.database.scheduleDateScopeArgs
 import com.traintracker.server.database.serviceDayArgs
 import com.traintracker.server.database.serviceDaySql
 import io.ktor.http.HttpStatusCode
+import io.ktor.server.application.ApplicationCall
 import io.ktor.server.response.respond
 import io.ktor.server.routing.Route
 import io.ktor.server.routing.get
@@ -144,6 +148,23 @@ internal class PunctualityCounts {
         }
         o.delay?.let { delaySum += it }
     }
+
+    /** Adds a row read with [SUMS] starting at column [from]. */
+    fun addSums(rs: java.sql.ResultSet, from: Int) {
+        total += rs.getInt(from); early += rs.getInt(from + 1); onTime += rs.getInt(from + 2); lateMinor += rs.getInt(from + 3)
+        lateModerate += rs.getInt(from + 4); lateSevere += rs.getInt(from + 5); cancelled += rs.getInt(from + 6)
+        noReport += rs.getInt(from + 7); delaySum += rs.getLong(from + 8)
+    }
+
+    val reported get() = early + onTime + lateMinor + lateModerate + lateSevere
+
+    /** Mean minutes late of reported calls, to one decimal place. */
+    val averageDelay get() = if (reported > 0) Math.round(delaySum * 10.0 / reported) / 10.0 else null
+
+    companion object {
+        /** The punctuality_daily columns summed, in the order [addSums] reads them. */
+        const val SUMS = "sum(total), sum(early), sum(on_time), sum(late_minor), sum(late_moderate), sum(late_severe), sum(cancelled), sum(no_report), sum(delay_sum)"
+    }
 }
 
 @Serializable
@@ -169,8 +190,43 @@ data class PunctualityResponse(
     val averageDelay: Double? = null,
 )
 
+/** One operator in the league: its points per call (0-100) and the counts behind them. */
+@Serializable
+data class LeagueRow(
+    val toc: String,
+    val score: Double,
+    /** Calls that scored: reported or cancelled. */
+    val scored: Int,
+    val calls: Int,
+    val early: Int,
+    val onTime: Int,
+    val lateMinor: Int,
+    val lateModerate: Int,
+    val lateSevere: Int,
+    val cancelled: Int,
+    val noReport: Int,
+    val averageDelay: Double? = null,
+)
+
+@Serializable
+data class LeagueResponse(
+    val days: Int,
+    val fromDate: String? = null,
+    val toDate: String? = null,
+    val timeFrom: String,
+    val timeTo: String,
+    /** Best first. */
+    val rows: List<LeagueRow>,
+    /** Operators left out: too few scored calls, or fewer than half their calls reported. */
+    val notEnough: List<String>,
+)
+
 internal object Punctuality {
     const val HISTORY_DAYS = 30L
+    private const val PLANNED_CANCELLATION = "PD"
+    /** Bump when the counting rules change, so stored days are rebuilt. 2: planned (PD) cancellations left out. */
+    private const val RULES_VERSION = "2"
+    private const val RULES_KEY = "punctuality_rules"
     private const val SLOT_MINUTES = 30
 
     private class ScheduleRow(
@@ -255,6 +311,9 @@ internal object Punctuality {
                             )
                         }
                     }
+                    // Planned not to run (cancelled with reason PD, "system-generated planned cancellation"), and
+                    // it didn't: not part of the day's service, so not counted. PD is the most common reason.
+                    if (moves.any { it.isCancelled && it.cancelReason == PLANNED_CANCELLATION } && moves.none { !it.actualTime.isNullOrEmpty() }) continue
                     val originCrs = origins[uid]?.originStanox?.let { CorpusLookup.crsFromStanox(it) }
                     val toc = CorpusLookup.operatorForTsc(rows.first().tsc)
                     for (o in callOutcomes(rows.map { it.stop }, moves, originCrs)) {
@@ -293,6 +352,12 @@ internal object Punctuality {
     /** Builds missing days now and then, hourly; yesterday first. Old days are pruned. */
     fun start(scope: CoroutineScope) = scope.launch {
         delay(5 * 60_000L)   // let startup and the Kafka backlog settle
+        // When the counting rules change, every stored day is worked out again.
+        if (AppDatabase.getCifMeta(RULES_KEY) != RULES_VERSION) {
+            transaction { execUpdate("DELETE FROM punctuality_days") }
+            AppDatabase.setCifMeta(RULES_KEY, RULES_VERSION)
+            log.info("Punctuality rules changed: rebuilding every stored day")
+        }
         while (isActive) {
             try {
                 transaction {
@@ -310,52 +375,110 @@ internal object Punctuality {
         }
     }
 
+    /**
+     * The half-hour slots from [from] (rounded down) to before [to], so 06:00-09:30 is 06:00-09:29; wraps past
+     * midnight when [to] is earlier. [sql] filters punctuality_daily with [args].
+     */
+    class SlotWindow(from: String, to: String) {
+        private val fromSlot = from.toMinutes() / SLOT_MINUTES
+        private val toSlot = maxOf(0, to.toMinutes() - 1) / SLOT_MINUTES
+        val sql = if (toSlot >= fromSlot) "slot BETWEEN ? AND ?" else "(slot >= ? OR slot <= ?)"
+        val args = listOf(fromSlot.toString(), toSlot.toString())
+        val timeFrom = clockTime(fromSlot * SLOT_MINUTES)
+        val timeTo = clockTime(minOf((toSlot + 1) * SLOT_MINUTES, 1439))
+    }
+
     /** Sums the stored counts for a station and/or operator over the last [HISTORY_DAYS] days and a time window. */
     fun summary(crs: String?, toc: String?, from: String, to: String): PunctualityResponse = transaction {
         val since = LocalDate.now().minusDays(HISTORY_DAYS).toString()
-        // Slots starting from [from] (rounded down to the half hour) and before [to]: 06:00-09:30 is 06:00-09:29.
-        val fromSlot = from.toMinutes() / SLOT_MINUTES
-        val toSlot = maxOf(0, to.toMinutes() - 1) / SLOT_MINUTES
-        val slotSql = if (toSlot >= fromSlot) "slot BETWEEN ? AND ?" else "(slot >= ? OR slot <= ?)"
+        val window = SlotWindow(from, to)
         val where = listOfNotNull(crs?.let { "crs = ?" to it }, toc?.let { "toc = ?" to it })
         val c = PunctualityCounts()
         var firstDate: String? = null
         var lastDate: String? = null
         val days = HashSet<String>()
         query(
-            "SELECT date, sum(total), sum(early), sum(on_time), sum(late_minor), sum(late_moderate), sum(late_severe), sum(cancelled), sum(no_report), sum(delay_sum) " +
-                "FROM punctuality_daily WHERE ${where.joinToString(" AND ") { it.first }} AND date >= ? AND $slotSql GROUP BY date",
-            where.map { it.second } + listOf(since, fromSlot.toString(), toSlot.toString())
+            "SELECT date, ${PunctualityCounts.SUMS} FROM punctuality_daily " +
+                "WHERE ${where.joinToString(" AND ") { it.first }} AND date >= ? AND ${window.sql} GROUP BY date",
+            where.map { it.second } + since + window.args
         ) { rs ->
             while (rs.next()) {
                 val date = rs.getString(1)
                 days += date
                 if (firstDate == null || date < firstDate!!) firstDate = date
                 if (lastDate == null || date > lastDate!!) lastDate = date
-                c.total += rs.getInt(2); c.early += rs.getInt(3); c.onTime += rs.getInt(4); c.lateMinor += rs.getInt(5)
-                c.lateModerate += rs.getInt(6); c.lateSevere += rs.getInt(7); c.cancelled += rs.getInt(8); c.noReport += rs.getInt(9)
-                c.delaySum += rs.getLong(10)
+                c.addSums(rs, 2)
             }
         }
-        val reported = c.early + c.onTime + c.lateMinor + c.lateModerate + c.lateSevere
         PunctualityResponse(
             crs = crs, toc = toc, fromDate = firstDate, toDate = lastDate, days = days.size,
-            timeFrom = clockTime(fromSlot * SLOT_MINUTES), timeTo = clockTime(minOf((toSlot + 1) * SLOT_MINUTES, 1439)),
+            timeFrom = window.timeFrom, timeTo = window.timeTo,
             calls = c.total, early = c.early, onTime = c.onTime, lateMinor = c.lateMinor, lateModerate = c.lateModerate,
             lateSevere = c.lateSevere, cancelled = c.cancelled, noReport = c.noReport,
-            averageDelay = if (reported > 0) Math.round(c.delaySum * 10.0 / reported) / 10.0 else null,
+            averageDelay = c.averageDelay,
         )
     }
 }
+
+/**
+ * Operators ranked by points per call over the last [League.PERIODS] finished days: early or on time 100,
+ * 1-4 min late 75, 5-14 late 40, 15+ late 10, cancelled 0. Calls with no report don't score.
+ */
+internal object League {
+    val PERIODS = setOf(1, 7, 30)
+    private const val MIN_SCORED_PER_DAY = 35
+
+    fun table(days: Int, from: String, to: String): LeagueResponse = transaction {
+        val dates = queryList("SELECT date FROM punctuality_days ORDER BY date DESC LIMIT ?", listOf(days.toString())) { it.getString(1) }
+        val window = Punctuality.SlotWindow(from, to)
+        val rows = ArrayList<LeagueRow>()
+        val notEnough = ArrayList<String>()
+        if (dates.isNotEmpty()) {
+            query(
+                "SELECT toc, ${PunctualityCounts.SUMS} FROM punctuality_daily " +
+                    "WHERE toc != '' AND date IN (${placeholders(dates.size)}) AND ${window.sql} GROUP BY toc",
+                dates + window.args
+            ) { rs ->
+                while (rs.next()) {
+                    val toc = rs.getString(1)
+                    val c = PunctualityCounts().apply { addSums(rs, 2) }
+                    val scored = c.reported + c.cancelled
+                    if (scored < MIN_SCORED_PER_DAY * dates.size || c.noReport * 2 > c.total) {
+                        if (c.total > 0) notEnough += toc
+                        continue
+                    }
+                    val points = 100.0 * (c.early + c.onTime) + 75.0 * c.lateMinor + 40.0 * c.lateModerate + 10.0 * c.lateSevere
+                    rows += LeagueRow(
+                        toc, Math.round(points * 10 / scored) / 10.0, scored, c.total, c.early, c.onTime, c.lateMinor,
+                        c.lateModerate, c.lateSevere, c.cancelled, c.noReport, c.averageDelay,
+                    )
+                }
+            }
+        }
+        LeagueResponse(
+            days = dates.size, fromDate = dates.lastOrNull(), toDate = dates.firstOrNull(), timeFrom = window.timeFrom, timeTo = window.timeTo,
+            rows = rows.sortedWith(compareByDescending<LeagueRow> { it.score }.thenByDescending { it.scored }), notEnough = notEnough.sorted(),
+        )
+    }
+}
+
+private val HHMM = Regex("^([01]\\d|2[0-3]):[0-5]\\d$")
+
+/** The from/to time-of-day query parameters ("HH:MM"), all day by default. */
+private fun ApplicationCall.timeWindow(): Pair<String, String> =
+    (parameters["from"]?.takeIf { it.matches(HHMM) } ?: "00:00") to (parameters["to"]?.takeIf { it.matches(HHMM) } ?: "23:59")
 
 fun Route.punctualityRoutes() {
     get("/punctuality") {
         val crs = call.parameters["crs"]?.uppercase()?.filter { it.isLetter() }?.take(3)?.takeIf { it.length == 3 }
         val toc = call.parameters["toc"]?.uppercase()?.filter { it.isLetterOrDigit() }?.take(4)?.takeIf { it.isNotEmpty() }
         if (crs == null && toc == null) return@get call.respond(HttpStatusCode.BadRequest, "crs or toc required")
-        val hhmm = Regex("^([01]\\d|2[0-3]):[0-5]\\d$")
-        val from = call.parameters["from"]?.takeIf { it.matches(hhmm) } ?: "00:00"
-        val to = call.parameters["to"]?.takeIf { it.matches(hhmm) } ?: "23:59"
+        val (from, to) = call.timeWindow()
         call.respond(dbQuery { Punctuality.summary(crs, toc, from, to) })
+    }
+    get("/league") {
+        val days = call.parameters["days"]?.toIntOrNull()?.takeIf { it in League.PERIODS } ?: 30
+        val (from, to) = call.timeWindow()
+        call.respond(dbQuery { League.table(days, from, to) })
     }
 }
