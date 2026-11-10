@@ -52,6 +52,24 @@ private class TrustTimes {
     val departureSecs = mutableMapOf<String, String>()
     /** Keys cancelled only because the train now starts later (change of origin). */
     val changeOfOriginKeys = mutableSetOf<String>()
+    /** Every reported movement, newest first, for calls whose times do not match exactly. */
+    val reports = mutableListOf<Report>()
+
+    class Report(val crs: String, val scheduled: String, val actual: String, val actualSec: String, val eventType: String, val cancelled: Boolean, val reason: String?)
+
+    /**
+     * The report at [crs] whose scheduled time is nearest [time], within 10 minutes, preferring [eventType].
+     * Movements carry working-timetable times and the timetable rows public ones, which can differ by a
+     * few minutes (a terminus booked 02:14 public is 02:12 in the WTT), so an exact match can miss.
+     */
+    fun nearest(crs: String?, time: String?, eventType: String): Report? {
+        if (crs == null || time.isNullOrEmpty()) return null
+        return reports.asSequence()
+            .filter { it.crs == crs && !it.cancelled && it.actual.isNotEmpty() }
+            .map { it to kotlin.math.abs(minutesLate(it.scheduled, time)) }
+            .filter { it.second <= 10 }
+            .minWithOrNull(compareBy<Pair<Report, Int>> { it.first.eventType != eventType }.thenBy { it.second })?.first
+    }
 }
 
 /** The value for a scheduled time, by time alone or else by "CRS|time". */
@@ -177,6 +195,15 @@ private fun JdbcTransaction.serviceRoute(uid: String, atCrs: String, svcDate: St
         val schedArr = row[Schedules.scheduledArrival]
         val schedDep = row[Schedules.scheduledDeparture]
         val trustEntry = trust.latest[scht] ?: crs?.let { trust.latest["$it|$scht"] }
+        // No exact match: the nearest report here (arrival at the terminus, departure elsewhere).
+        val terminus = row[Schedules.stopType] == "LT"
+        val near = if (trustEntry == null) {
+            trust.nearest(crs, if (terminus) schedArr ?: scht else schedDep ?: scht, if (terminus) "ARRIVAL" else "DEPARTURE")
+        } else {
+            null
+        }
+        val nearArr = near?.takeIf { it.eventType == "ARRIVAL" }
+        val nearDep = near?.takeIf { it.eventType == "DEPARTURE" }
         val (platform, confirmed) = resolvePlatform(uid, tiploc, crs, row[Schedules.platform], darwinDb[tiploc], trustPlatforms)
         CallingPointResponse(
             tiploc,
@@ -190,11 +217,11 @@ private fun JdbcTransaction.serviceRoute(uid: String, atCrs: String, svcDate: St
             row[Schedules.platform],
             row[Schedules.isPass],
             row[Schedules.stopType],
-            trustEntry?.first ?: "",
-            trust.arrivals.at(schedArr, crs) ?: "",
-            trust.departures.at(schedDep, crs) ?: trust.departures.at(scht, crs) ?: "",
-            trust.arrivalSecs.at(schedArr, crs) ?: "",
-            trust.departureSecs.at(schedDep, crs) ?: trust.departureSecs.at(scht, crs) ?: "",
+            trustEntry?.first ?: near?.actual ?: "",
+            trust.arrivals.at(schedArr, crs) ?: nearArr?.actual ?: "",
+            trust.departures.at(schedDep, crs) ?: trust.departures.at(scht, crs) ?: nearDep?.actual ?: "",
+            trust.arrivalSecs.at(schedArr, crs) ?: nearArr?.actualSec ?: "",
+            trust.departureSecs.at(schedDep, crs) ?: trust.departureSecs.at(scht, crs) ?: nearDep?.actualSec ?: "",
             (trustEntry?.second ?: false) || ttCancelled,
             trustEntry?.third ?: if (ttCancelled) TIMETABLE_CANCELLED else null
         )
@@ -202,7 +229,9 @@ private fun JdbcTransaction.serviceRoute(uid: String, atCrs: String, svcDate: St
     val spread = applyCancellations(cps) { cp ->
         cp.scheduledTime in trust.changeOfOriginKeys || "${cp.crs}|${cp.scheduledTime}" in trust.changeOfOriginKeys
     }
-    val projected = projectDelays(spread, trust.latest.keys)
+    // Calls matched to the nearest report count as reported, so later estimates build on them.
+    val reportedKeys = trust.latest.keys + spread.filter { it.actualTime.isNotEmpty() && !it.isPredicted }.map { it.effectiveTime() }
+    val projected = projectDelays(spread, reportedKeys)
     val loTime = projected.firstOrNull { it.stopType == "LO" }?.effectiveTime() ?: "00:00"
     val ltTime = projected.firstOrNull { it.stopType == "LT" }?.effectiveTime() ?: "23:59"
     val ordered = if (loTime > ltTime) projected.sortedFromClock(loTime) { it.effectiveTime() } else projected
@@ -328,6 +357,7 @@ private fun JdbcTransaction.trustTimes(uid: String, svcDate: String, tdOverlay: 
             val actualSec = td?.seconds ?: ""
             val crs = (rs.getString("crs")?.takeIf { it.isNotEmpty() } ?: CorpusLookup.crsFromStanox(rs.getString("stanox") ?: ""))
                 ?.let { TRUST_CRS_ALIASES[it] ?: it }
+            if (crs != null) times.reports += TrustTimes.Report(crs, scht, actual, actualSec, eventType, isCancelled, cancelReason)
             for (key in listOfNotNull(scht, crs?.let { "$it|$scht" })) {
                 if (eventType == LinxMovementWriter.COO_CANCELLATION) times.changeOfOriginKeys += key
                 val existing = times.latest[key]
