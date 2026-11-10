@@ -46,7 +46,12 @@ dependencies {
     implementation("org.json:json:20260814")
     implementation("ch.qos.logback:logback-classic:1.6.6")
     implementation("org.slf4j:slf4j-api:2.0.20")
+
+    testImplementation(kotlin("test"))
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
+
+tasks.test { useJUnitPlatform() }
 
 tasks.shadowJar {
     archiveFileName.set("traintracker-backend-2.0.0.jar")

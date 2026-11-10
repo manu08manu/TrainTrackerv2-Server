@@ -71,18 +71,7 @@ fun Route.serviceDetailRoutes() {
         val activationOriginCrs = dbQuery {
             activationsFor(listOf(uid), svcDate)[uid]?.originStanox?.let { CorpusLookup.crsFromStanox(it) }
         }
-        val cps = route.callingPoints.let { all ->
-            val startIdx = if (activationOriginCrs != null) all.indexOfFirst { it.crs == activationOriginCrs } else -1
-            val terminusCrs = all.lastOrNull { it.stopType == "LT" }?.crs
-            if (startIdx > 0 && activationOriginCrs != terminusCrs) {
-                val reason = all.take(startIdx).firstOrNull { it.isCancelled && it.cancelReason != null }?.cancelReason
-                all.mapIndexed { i, cp ->
-                    if (i < startIdx && !cp.isCancelled && cp.actualTime.isEmpty()) cp.copy(isCancelled = true, cancelReason = reason) else cp
-                }
-            } else {
-                all
-            }
-        }
+        val cps = cancelBeforeOrigin(route.callingPoints, activationOriginCrs)
         if (cps.isEmpty()) return@get call.respond(HttpStatusCode.NotFound, "Service $uid not found")
 
         // Split at the requested station into calls before it and from it onwards.
@@ -210,13 +199,9 @@ private fun JdbcTransaction.serviceRoute(uid: String, atCrs: String, svcDate: St
             trustEntry?.third ?: if (ttCancelled) TIMETABLE_CANCELLED else null
         )
     }
-    // Stops cancelled by a change of origin are cancelled themselves but do not cancel the rest of the run.
-    val cooIdx = cps.indices.filter { i ->
-        val cp = cps[i]
-        cp.isCancelled && (cp.scheduledTime in trust.changeOfOriginKeys || "${cp.crs}|${cp.scheduledTime}" in trust.changeOfOriginKeys)
-    }.toSet()
-    val spread = propagateCancellations(cps.mapIndexed { i, cp -> if (i in cooIdx) cp.copy(isCancelled = false, cancelReason = null) else cp })
-        .mapIndexed { i, cp -> if (i in cooIdx) cps[i] else cp }
+    val spread = applyCancellations(cps) { cp ->
+        cp.scheduledTime in trust.changeOfOriginKeys || "${cp.crs}|${cp.scheduledTime}" in trust.changeOfOriginKeys
+    }
     val projected = projectDelays(spread, trust.latest.keys)
     val loTime = projected.firstOrNull { it.stopType == "LO" }?.effectiveTime() ?: "00:00"
     val ltTime = projected.firstOrNull { it.stopType == "LT" }?.effectiveTime() ?: "23:59"
@@ -363,11 +348,39 @@ private fun JdbcTransaction.trustTimes(uid: String, svcDate: String, tdOverlay: 
 }
 
 /**
+ * Cancellations as shown: [propagateCancellations], except that a call cancelled by a change of origin
+ * ([isChangeOfOrigin]) stays cancelled itself without cancelling the rest of the run.
+ */
+internal fun applyCancellations(
+    cps: List<CallingPointResponse>,
+    isChangeOfOrigin: (CallingPointResponse) -> Boolean,
+): List<CallingPointResponse> {
+    val cooIdx = cps.indices.filter { cps[it].isCancelled && isChangeOfOrigin(cps[it]) }.toSet()
+    return propagateCancellations(cps.mapIndexed { i, cp -> if (i in cooIdx) cp.copy(isCancelled = false, cancelReason = null) else cp })
+        .mapIndexed { i, cp -> if (i in cooIdx) cps[i] else cp }
+}
+
+/**
+ * A train activated from a later station ([activationOriginCrs], after a change of origin) starts there: the
+ * calls before it stay in the list but are cancelled (unless they somehow ran), with the reason given on any
+ * of them. Unchanged when the activation origin is the timetabled one, the terminus, or not in the list.
+ */
+internal fun cancelBeforeOrigin(all: List<CallingPointResponse>, activationOriginCrs: String?): List<CallingPointResponse> {
+    val startIdx = if (activationOriginCrs != null) all.indexOfFirst { it.crs == activationOriginCrs } else -1
+    val terminusCrs = all.lastOrNull { it.stopType == "LT" }?.crs
+    if (startIdx <= 0 || activationOriginCrs == terminusCrs) return all
+    val reason = all.take(startIdx).firstOrNull { it.isCancelled && it.cancelReason != null }?.cancelReason
+    return all.mapIndexed { i, cp ->
+        if (i < startIdx && !cp.isCancelled && cp.actualTime.isEmpty()) cp.copy(isCancelled = true, cancelReason = reason) else cp
+    }
+}
+
+/**
  * Spreads cancellations: a service cancelled at origin that never ran is cancelled throughout; a cancellation
  * before any running is carried back to the origin; otherwise calls after a cancellation without an actual
  * time are cancelled too.
  */
-private fun propagateCancellations(raw: List<CallingPointResponse>): List<CallingPointResponse> {
+internal fun propagateCancellations(raw: List<CallingPointResponse>): List<CallingPointResponse> {
     val loCancel = raw.firstOrNull { it.stopType == "LO" }?.takeIf { it.isCancelled }
     val neverRan = loCancel != null && raw.none { it.actualTime.isNotEmpty() } && raw.none { !it.isCancelled && it.stopType != "LO" }
     val cps = if (neverRan) {

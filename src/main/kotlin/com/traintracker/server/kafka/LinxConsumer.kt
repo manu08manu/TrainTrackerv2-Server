@@ -6,31 +6,21 @@ import com.traintracker.server.database.AppDatabase
 import com.traintracker.server.database.MovementBatch
 import com.traintracker.server.database.execUpdate
 import com.traintracker.server.database.query
-import java.io.StringReader
-import java.time.LocalDate
-import java.time.LocalDateTime
-import java.time.LocalTime
-import java.time.OffsetDateTime
-import java.time.ZoneId
-import java.time.ZoneOffset
-import java.time.format.DateTimeFormatter
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicLong
-import javax.xml.parsers.DocumentBuilderFactory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 import org.slf4j.LoggerFactory
-import org.w3c.dom.Element
-import org.xml.sax.InputSource
 
 private val log = LoggerFactory.getLogger("LinxConsumer")
 
 /**
  * Network Rail LINX EI (TAF/TSI XML), the successor to the TRUST movements feed and the source of all train
- * running data. Each poll is stored in the linx_* tables (kept briefly, for the TD platform fill and for
- * debugging) and handed to [LinxMovementWriter], which writes movements / train_activations.
+ * running data. Messages are parsed by [LinxParser]; each poll is stored in the linx_* tables (kept briefly,
+ * for the TD platform fill and for debugging) and handed to [LinxMovementWriter], which writes movements /
+ * train_activations in UK clock time (see [LinxClock]).
  *
  * Flows (Kafka header "linx.flow"):
  *  - S509 Train Activation (PathDetailsMessage): uid, origin and its departure time.
@@ -41,29 +31,19 @@ private val log = LoggerFactory.getLogger("LinxConsumer")
  *  - S515 Change of Identity: modification code 07; OperationalTrainNumber is the new headcode and
  *    ReferenceOTN the old one. The train ID does not change.
  * Unknown flows and parse failures are sampled into linx_raw.
- *
- * Times are labelled "-00:00". Whether that is true UTC, or UK clock time labelled as UTC (as TRUST's were),
- * only shows in British Summer Time, so it is detected rather than assumed: see [voteClock]. All times are
- * stored as UK clock time, like the timetable.
- *
- * Identifiers: the "TR" core is the TRUST train ID with a "--" prefix; the "PA" core is headcode + uid + 2
- * digits. LocationPrimaryCode is not a STANOX, so locations are keyed by TIPLOC and mapped to STANOX here.
  */
 object LinxConsumer {
     const val TOPIC = "prod-1033-NWR-LINX-EI1_0"
-    private const val RAW_SAMPLE_LIMIT = 200 // raw messages kept per poll window for unknown flows / failures
+    private const val RAW_SAMPLE_LIMIT = 200 // raw messages kept per minute for unknown flows / failures
+    private const val CLOCK_VOTES_NEEDED = 20
 
-    private val pending = ConcurrentLinkedQueue<Pending>()
+    private val pending = ConcurrentLinkedQueue<LinxMessage>()
     private val counts = ConcurrentHashMap<String, AtomicLong>()
     private var lastReport = System.currentTimeMillis()
     private var lastPlatformFill = 0L
     private var rawThisMinute = 0
 
-    private val LONDON: ZoneId = ZoneId.of("Europe/London")
-    private val HHMM: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
-    private const val CLOCK_VOTES_NEEDED = 20
-
-    /** True when LINX's "-00:00" times are really UK clock time; decided by [voteClock] / [decideClock]. */
+    /** True when LINX's "-00:00" times are really UK clock time; settled by [decideClock]. */
     @Volatile private var labelsUkTime = false
     private var clockDecided = false
     private var votesUkTime = 0
@@ -73,22 +53,7 @@ object LinxConsumer {
     @Volatile private var tiplocStanox: Map<String, String> = emptyMap()
     @Volatile private var tiplocStanoxLoadedAt = 0L
 
-    private sealed class Pending
-    private class Movement(
-        val trainId: String, val uid: String, val headcode: String, val startDate: String,
-        val tiploc: String, val stanox: String?, val crs: String?, val locStatus: String, val eventType: String,
-        val bookedTs: String, val actualTs: String, val delay: Int?, val referenceOtn: String?, val receivedMs: Long,
-    ) : Pending()
-    private class Activation(
-        val trainId: String, val uid: String, val headcode: String, val startDate: String,
-        val originTiploc: String?, val originStanox: String?, val originTime: String?, val receivedMs: Long,
-    ) : Pending()
-    private class Modification(
-        val trainId: String, val uid: String, val headcode: String, val startDate: String,
-        val code: String, val kind: String, val tiploc: String?, val stanox: String?, val time: String?,
-        val reason: String?, val modifiedAt: String?, val receivedMs: Long, val previousHeadcode: String? = null,
-    ) : Pending()
-    private class Raw(val flow: String, val note: String, val xml: String, val receivedMs: Long) : Pending()
+    private val parser = LinxParser(::stanoxFor, CorpusLookup::crsFromTiploc)
 
     fun start(scope: CoroutineScope): Job =
         launchConsumer(scope, "LINX", TOPIC, Config.kafkaGroupIdLinx, log) { _, records ->
@@ -101,8 +66,8 @@ object LinxConsumer {
 
     private fun count(key: String) = counts.getOrPut(key) { AtomicLong() }.incrementAndGet()
 
-    private fun stanoxFor(tiploc: String?): String? {
-        if (tiploc.isNullOrEmpty()) return null
+    private fun stanoxFor(tiploc: String): String? {
+        if (tiploc.isEmpty()) return null
         val now = System.currentTimeMillis()
         if (now - tiplocStanoxLoadedAt > 3_600_000L) {
             tiplocStanoxLoadedAt = now
@@ -124,80 +89,32 @@ object LinxConsumer {
         return tiplocStanox[tiploc]
     }
 
-    // ---- XML helpers (default namespace, so element names are unprefixed) ----
-
-    private val dbf: DocumentBuilderFactory = DocumentBuilderFactory.newInstance().apply {
-        isNamespaceAware = false
-        setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
-        setFeature("http://xml.org/sax/features/external-general-entities", false)
-        setFeature("http://xml.org/sax/features/external-parameter-entities", false)
-        isXIncludeAware = false
-        isExpandEntityReferences = false
-    }
-
-    private fun Element.first(tag: String): Element? = getElementsByTagName(tag).item(0) as? Element
-    private fun Element.text(tag: String): String? = first(tag)?.textContent?.trim()?.takeIf { it.isNotEmpty() }
-
-    /** (TR core, PA core) from the TransportOperationalIdentifiers / PlannedTransportIdentifiers blocks. */
-    private fun identifiers(root: Element): Pair<String?, String?> {
-        var tr: String? = null
-        var pa: String? = null
-        val types = root.getElementsByTagName("ObjectType")
-        for (i in 0 until types.length) {
-            val block = types.item(i).parentNode as? Element ?: continue
-            when (types.item(i).textContent.trim()) {
-                "TR" -> tr = tr ?: block.text("Core")
-                "PA" -> pa = pa ?: block.text("Core")
-            }
-        }
-        return tr to pa
-    }
-
-    private class Ids(val trainId: String, val uid: String, val headcode: String, val startDate: String)
-
-    private fun ids(root: Element): Ids? {
-        val (tr, pa) = identifiers(root)
-        val trainId = tr?.trimStart('-')?.takeIf { it.length == 10 && it.all(Char::isLetterOrDigit) } ?: return null
-        // Headcode + uid + 2 digits; a 5-character uid (VSTP and special workings) is space-padded: "1Z11 3224112".
-        val uid = pa?.takeIf { it.length >= 10 }?.substring(4, 10)?.trim()?.takeIf { it.isNotEmpty() && it.all(Char::isLetterOrDigit) } ?: ""
-        val headcode = root.text("OperationalTrainNumber")?.take(4) ?: trainId.substring(2, 6)
-        val startDate = root.text("StartDate")?.take(10) ?: ""
-        return Ids(trainId, uid, headcode, startDate)
-    }
-
-    /** LocationSubsidiaryCode (the TIPLOC) inside [el]. */
-    private fun tiplocIn(el: Element?): String? = el?.text("LocationSubsidiaryCode")?.takeIf { it.length <= 7 && it.all(Char::isLetterOrDigit) }
-
-    private fun handle(flow: String, xml: String, tsMs: Long) {
+    private fun handle(flow: String, xml: String, kafkaMs: Long) {
         count("flow:$flow")
-        try {
-            val root = dbf.newDocumentBuilder().parse(InputSource(StringReader(xml))).documentElement
-            voteClock(root, tsMs)
-            when (flow) {
-                "S510" -> running(root, tsMs)
-                "S509" -> activation(root, tsMs)
-                "S513", "S515" -> modification(root, tsMs)   // same TrainJourneyModificationMessage
-                else -> raw(flow, "unhandled flow", xml, tsMs)
-            }
+        val parsed = try {
+            parser.parse(flow, xml, kafkaMs)
         } catch (e: Exception) {
             count("error")
-            raw(flow, "parse error: ${e.message?.take(200)}", xml, tsMs)
+            raw(LinxRaw(flow, "parse error: ${e.message?.take(200)}", xml, kafkaMs))
+            return
+        }
+        when (LinxClock.vote(parsed.sentAt, kafkaMs)) {
+            true -> votesUkTime++
+            false -> votesUtc++
+            null -> {}
+        }
+        parsed.problem?.let(::count)
+        when (val m = parsed.message) {
+            null -> {}
+            is LinxRaw -> raw(m)
+            else -> pending.add(m)
         }
     }
 
-    /**
-     * Kafka's timestamp is true UTC and lands within ~1.5 seconds of LINX's MessageDateTime. If the labelled
-     * time is about an hour ahead of it, LINX is sending UK summer time labelled as UTC; if they agree, the
-     * labels are true UTC. (In GMT both agree, and either reading gives the same clock time.)
-     */
-    private fun voteClock(root: Element, kafkaMs: Long) {
-        val sent = root.text("MessageDateTime") ?: return
-        val labelledS = try { OffsetDateTime.parse(sent).toEpochSecond() } catch (e: Exception) { return }
-        val gap = labelledS - kafkaMs / 1000
-        when {
-            gap in 1800..5400 -> votesUkTime++
-            kotlin.math.abs(gap) < 1800 -> votesUtc++
-        }
+    private fun raw(m: LinxRaw) {
+        if (rawThisMinute >= RAW_SAMPLE_LIMIT) return
+        rawThisMinute++
+        pending.add(m.copy(xml = m.xml.take(20_000)))
     }
 
     /** Settles [labelsUkTime] once enough messages have voted; runs before a poll's times are converted. */
@@ -213,101 +130,32 @@ object LinxConsumer {
         votesUtc = 0
     }
 
-    private fun raw(flow: String, note: String, xml: String, tsMs: Long) {
-        if (rawThisMinute >= RAW_SAMPLE_LIMIT) return
-        rawThisMinute++
-        pending.add(Raw(flow, note, xml.take(20_000), tsMs))
-    }
-
-    private fun running(root: Element, tsMs: Long) {
-        val ids = ids(root) ?: return run { count("S510:no-id") }
-        val report = root.first("TrainLocationReport") ?: return run { count("S510:no-report") }
-        val tiploc = tiplocIn(report.first("Location")) ?: return run { count("S510:no-tiploc") }
-        val status = report.text("TrainLocationStatus") ?: ""
-        val eventType = when (status) {
-            "01" -> "DESTINATION"
-            "03" -> "ARRIVAL"
-            "04" -> "DEPARTURE"
-            else -> "STATUS_$status"
-        }
-        val stanox = stanoxFor(tiploc)
-        if (stanox == null) count("S510:no-stanox")
-        pending.add(
-            Movement(
-                ids.trainId, ids.uid, ids.headcode, ids.startDate, tiploc, stanox, CorpusLookup.crsFromTiploc(tiploc),
-                status, eventType,
-                bookedTs = report.text("BookedLocationDateTime") ?: "",
-                actualTs = report.text("LocationDateTime") ?: "",
-                delay = report.first("TrainDelay")?.text("AgainstBooked")?.toIntOrNull(),
-                referenceOtn = root.text("ReferenceOTN"),
-                receivedMs = tsMs,
-            )
-        )
-    }
-
-    private fun activation(root: Element, tsMs: Long) {
-        val ids = ids(root) ?: return run { count("S509:no-id") }
-        // The first PlannedJourneyLocation is the origin; it also carries the UID parameter.
-        val origin = root.first("PlannedJourneyLocation")
-        var uid = ids.uid
-        val params = root.getElementsByTagName("NetworkSpecificParameter")
-        for (i in 0 until params.length) {
-            val p = params.item(i) as? Element ?: continue
-            if (p.text("Name") == "UID") p.text("Value")?.takeIf { it.all(Char::isLetterOrDigit) }?.let { uid = it }
-        }
-        val tiploc = tiplocIn(origin)
-        pending.add(Activation(ids.trainId, uid, ids.headcode, ids.startDate, tiploc, stanoxFor(tiploc), origin?.text("Time"), tsMs))
-    }
-
-    private fun modification(root: Element, tsMs: Long) {
-        val ids = ids(root) ?: return run { count("modification:no-id") }
-        val mod = root.first("TrainJourneyModification")
-        val code = mod?.text("TrainJourneyModificationIndicator") ?: ""
-        val kind = when (code) {
-            "91" -> "CANCELLATION"
-            "92" -> "CANCELLATION_EN_ROUTE"
-            "94" -> "CHANGE_OF_ORIGIN"
-            "96" -> "REINSTATEMENT"
-            "07" -> "CHANGE_OF_IDENTITY"   // S515: OperationalTrainNumber is the new headcode, ReferenceOTN the old
-            else -> "CODE_$code"
-        }
-        val loc = mod?.first("LocationModified")
-        val tiploc = tiplocIn(loc)
-        val reasonEl = root.first("ModificationReason")
-        val reason = reasonEl?.getAttribute("NationalDelayCode")?.takeIf { it.isNotEmpty() }
-        pending.add(
-            Modification(
-                ids.trainId, ids.uid, ids.headcode, ids.startDate, code, kind, tiploc, stanoxFor(tiploc),
-                loc?.text("Time"), reason, root.text("TrainJourneyModificationTime"), tsMs,
-                previousHeadcode = root.first("ReferenceOTN")?.text("OperationalTrainNumber")?.take(4),
-            )
-        )
-    }
+    private fun ukTime(ts: String) = LinxClock.ukTime(ts, labelsUkTime)
 
     private fun flush() {
         decideClock()
-        val batch = ArrayList<Pending>()
+        val batch = ArrayList<LinxMessage>()
         while (true) batch.add(pending.poll() ?: break)
         if (batch.isNotEmpty()) {
             try {
                 transaction {
                     for (p in batch) when (p) {
-                        is Movement -> execUpdate(
+                        is LinxMovement -> execUpdate(
                             "INSERT OR REPLACE INTO linx_movements (train_id, uid, headcode, start_date, tiploc, stanox, crs, loc_status, event_type, booked_ts, actual_ts, booked_time, actual_time, delay, reference_otn, received_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                             listOf(
                                 p.trainId, p.uid, p.headcode, p.startDate, p.tiploc, p.stanox, p.crs, p.locStatus, p.eventType,
                                 p.bookedTs, p.actualTs, ukTime(p.bookedTs), ukTime(p.actualTs), p.delay?.toString(), p.referenceOtn, p.receivedMs.toString(),
                             )
                         )
-                        is Activation -> execUpdate(
+                        is LinxActivation -> execUpdate(
                             "INSERT OR REPLACE INTO linx_activations (train_id, uid, headcode, start_date, origin_tiploc, origin_stanox, origin_time, received_ms) VALUES (?,?,?,?,?,?,?,?)",
                             listOf(p.trainId, p.uid, p.headcode, p.startDate, p.originTiploc, p.originStanox, p.originTime, p.receivedMs.toString())
                         )
-                        is Modification -> execUpdate(
+                        is LinxModification -> execUpdate(
                             "INSERT INTO linx_modifications (train_id, uid, headcode, start_date, code, kind, tiploc, stanox, time, reason, modified_at, received_ms, previous_headcode) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                             listOf(p.trainId, p.uid, p.headcode, p.startDate, p.code, p.kind, p.tiploc, p.stanox, p.time, p.reason, p.modifiedAt, p.receivedMs.toString(), p.previousHeadcode)
                         )
-                        is Raw -> execUpdate(
+                        is LinxRaw -> execUpdate(
                             "INSERT INTO linx_raw (flow, note, xml, received_ms) VALUES (?,?,?,?)",
                             listOf(p.flow, p.note, p.xml, p.receivedMs.toString())
                         )
@@ -354,7 +202,7 @@ object LinxConsumer {
                         rows += Row(
                             listOf(rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4)),
                             rs.getString(5), rs.getString(6), rs.getString(7),
-                            epochSeconds(rs.getString(8)),
+                            LinxClock.epochSeconds(rs.getString(8), labelsUkTime),
                         )
                     }
                 }
@@ -383,62 +231,33 @@ object LinxConsumer {
         }
     }
 
-    /** Also writes TRUST-shaped rows (movements, train_activations) so every reader uses LINX data. */
-    private fun writeMovements(batch: List<Pending>) {
+    /** Also writes the movements / train_activations rows every reader uses. */
+    private fun writeMovements(batch: List<LinxMessage>) {
         try {
             val rows = ArrayList<MovementBatch>()
             for (p in batch) when (p) {
-                is Movement -> LinxMovementWriter.movement(
+                is LinxMovement -> LinxMovementWriter.movement(
                     p.trainId, p.uid, p.headcode, p.stanox, p.crs, p.eventType, ukTime(p.bookedTs), ukTime(p.actualTs), p.delay
                 )?.let(rows::add)
-                is Activation -> LinxMovementWriter.activation(p.trainId, p.uid, p.originStanox)
-                is Modification -> when (p.kind) {
-                    "CANCELLATION", "CANCELLATION_EN_ROUTE" ->
-                        LinxMovementWriter.cancellation(p.trainId, p.uid, p.headcode, p.stanox, ukClock(p.time, p.startDate), p.reason)
+                is LinxActivation -> LinxMovementWriter.activation(p.trainId, p.uid, p.originStanox)
+                is LinxModification -> when (p.kind) {
+                    "CANCELLATION", "CANCELLATION_EN_ROUTE" -> LinxMovementWriter.cancellation(
+                        p.trainId, p.uid, p.headcode, p.stanox, LinxClock.ukClock(p.time, p.startDate, labelsUkTime), p.reason
+                    )
                     "CHANGE_OF_IDENTITY" -> p.previousHeadcode?.let { LinxMovementWriter.changeOfIdentity(p.trainId, p.uid, it, p.headcode) }
-                    "REINSTATEMENT" -> LinxMovementWriter.reinstatement(p.trainId, p.uid, p.headcode, p.stanox, ukClock(p.time, p.startDate))
+                    "REINSTATEMENT" -> LinxMovementWriter.reinstatement(
+                        p.trainId, p.uid, p.headcode, p.stanox, LinxClock.ukClock(p.time, p.startDate, labelsUkTime)
+                    )
                     "CHANGE_OF_ORIGIN" -> LinxMovementWriter.changeOfOrigin(
                         p.trainId, p.uid, p.headcode, p.startDate, p.tiploc, p.stanox, p.reason, ::stanoxFor
                     )
                     else -> {}
                 }
-                is Raw -> {}
+                is LinxRaw -> {}
             }
             AppDatabase.batchUpsertMovements(rows)
         } catch (e: Exception) {
             log.warn("LINX movement write failed: ${e.message}")
-        }
-    }
-
-    /** LINX date-time ("2026-11-10T13:31:00-00:00") -> epoch seconds; null when unparseable. */
-    private fun epochSeconds(ts: String?): Long? = try {
-        ts?.let {
-            if (labelsUkTime) LocalDateTime.parse(it.substring(0, 19)).atZone(LONDON).toEpochSecond()
-            else OffsetDateTime.parse(it).toEpochSecond()
-        }
-    } catch (e: Exception) {
-        null
-    }
-
-    /** LINX date-time -> UK clock time "HH:mm"; "" when missing. */
-    private fun ukTime(ts: String): String {
-        if (ts.length < 16) return ""
-        if (labelsUkTime) return ts.substring(11, 16)
-        return try {
-            OffsetDateTime.parse(ts).atZoneSameInstant(LONDON).format(HHMM)
-        } catch (e: Exception) {
-            ts.substring(11, 16)
-        }
-    }
-
-    /** A LINX time with no date or offset ("14:17:00", on [date]) -> UK clock time "HH:mm"; "" when missing. */
-    private fun ukClock(time: String?, date: String): String {
-        val t = time?.takeIf { it.length >= 5 } ?: return ""
-        if (labelsUkTime) return t.take(5)
-        return try {
-            LocalDateTime.of(LocalDate.parse(date), LocalTime.parse(t)).atOffset(ZoneOffset.UTC).atZoneSameInstant(LONDON).format(HHMM)
-        } catch (e: Exception) {
-            t.take(5)
         }
     }
 }
