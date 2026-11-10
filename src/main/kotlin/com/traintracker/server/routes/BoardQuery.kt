@@ -14,6 +14,7 @@ import com.traintracker.server.database.scheduleDateScope
 import com.traintracker.server.database.scheduleDateScopeArgs
 import com.traintracker.server.database.serviceDayArgs
 import com.traintracker.server.database.serviceDaySql
+import com.traintracker.server.kafka.LinxMovementWriter
 import java.time.LocalDate
 import org.jetbrains.exposed.v1.core.Op
 import org.jetbrains.exposed.v1.core.ResultRow
@@ -339,7 +340,7 @@ private fun JdbcTransaction.boardServices(
                 while (rs.next()) cancelledOnlyTrainId[rs.getString("uid") ?: continue] = rs.getString("train_id") ?: continue
             }
             query(
-                "SELECT uid, train_id, scheduled_time, actual_time, is_cancelled, cancel_reason FROM trust_movements WHERE uid IN (${placeholders(uids.size)}) AND ${serviceDaySql("event_ts")} ORDER BY event_ts DESC",
+                "SELECT uid, train_id, scheduled_time, actual_time, is_cancelled, cancel_reason, event_type FROM trust_movements WHERE uid IN (${placeholders(uids.size)}) AND ${serviceDaySql("event_ts")} ORDER BY event_ts DESC",
                 args
             ) { rs ->
                 while (rs.next()) {
@@ -354,7 +355,8 @@ private fun JdbcTransaction.boardServices(
                     val stopKey = "$uid|$scht"
                     trust.putIfAbsent(stopKey, entry)
                     if (!trustReasonCode.containsKey(stopKey)) trustReasonCode[stopKey] = reasonCode
-                    if (isCancelled) {
+                    // A change-of-origin cancellation cancels its own stop only, not the rest of the run.
+                    if (isCancelled && rs.getString("event_type") != LinxMovementWriter.COO_CANCELLATION) {
                         trust.putIfAbsent(uid, entry)
                         if (!trustReasonCode.containsKey(uid)) trustReasonCode[uid] = reasonCode
                     }

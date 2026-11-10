@@ -106,6 +106,12 @@ object AppDatabase {
             "DELETE FROM schedules WHERE stp_indicator = 'N' AND schedule_end_date < date('now', '-30 days')",
             "DELETE FROM cif_change_alerts WHERE dismissed_at IS NOT NULL AND dismissed_at < datetime('now', '-7 days')",
             "DELETE FROM feedback WHERE dismissed_at IS NOT NULL AND dismissed_at < datetime('now', '-30 days')",
+            // linx_movements / linx_activations duplicate trust_movements / train_activations; they are only
+            // needed for the TD platform fill (15 minutes) and debugging.
+            "DELETE FROM linx_movements WHERE received_ms < (strftime('%s','now') - 2*86400) * 1000",
+            "DELETE FROM linx_activations WHERE received_ms < (strftime('%s','now') - 2*86400) * 1000",
+            "DELETE FROM linx_modifications WHERE received_ms < (strftime('%s','now') - 31*86400) * 1000",
+            "DELETE FROM linx_raw WHERE received_ms < (strftime('%s','now') - 7*86400) * 1000",
         ).forEach { sql ->
             try {
                 transaction { exec(sql) }

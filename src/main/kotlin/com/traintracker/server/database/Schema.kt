@@ -48,6 +48,16 @@ object Schema {
         "CREATE TABLE IF NOT EXISTS smart_berths (id INTEGER PRIMARY KEY AUTOINCREMENT, TD TEXT NOT NULL DEFAULT '', StepType TEXT NOT NULL DEFAULT '', FromBerth TEXT NOT NULL DEFAULT '', ToBerth TEXT NOT NULL DEFAULT '', Stanox TEXT NOT NULL DEFAULT '', Stanme TEXT NOT NULL DEFAULT '', Event TEXT NOT NULL DEFAULT '', Platform TEXT NOT NULL DEFAULT '', ToLine TEXT NOT NULL DEFAULT '', BerthOffset INTEGER, Route TEXT NOT NULL DEFAULT '', FromLine TEXT NOT NULL DEFAULT '', Comment TEXT NOT NULL DEFAULT '', Source TEXT NOT NULL DEFAULT '', ChangedBy TEXT, ChangedAt TEXT DEFAULT (datetime('now')))",
         "CREATE INDEX IF NOT EXISTS idx_smart_berths_stanox ON smart_berths(stanox)",
         "CREATE INDEX IF NOT EXISTS idx_smart_berths_key ON smart_berths(TD, FromBerth, ToBerth)",
+        // LINX EI (standalone for now; see LinxConsumer). Times are kept as sent, plus "HH:mm".
+        "CREATE TABLE IF NOT EXISTS linx_movements (train_id TEXT NOT NULL, uid TEXT NOT NULL DEFAULT '', headcode TEXT NOT NULL DEFAULT '', start_date TEXT NOT NULL DEFAULT '', tiploc TEXT NOT NULL, stanox TEXT, crs TEXT, loc_status TEXT NOT NULL DEFAULT '', event_type TEXT NOT NULL, booked_ts TEXT NOT NULL DEFAULT '', actual_ts TEXT NOT NULL DEFAULT '', booked_time TEXT NOT NULL DEFAULT '', actual_time TEXT NOT NULL DEFAULT '', delay INTEGER, reference_otn TEXT, received_ms INTEGER NOT NULL, platform TEXT, platform_source TEXT, PRIMARY KEY (train_id, tiploc, loc_status, booked_ts)) WITHOUT ROWID",
+        "CREATE INDEX IF NOT EXISTS idx_linx_mvt_uid ON linx_movements(uid, start_date)",
+        "CREATE INDEX IF NOT EXISTS idx_linx_mvt_received ON linx_movements(received_ms)",
+        "CREATE TABLE IF NOT EXISTS linx_activations (train_id TEXT PRIMARY KEY, uid TEXT NOT NULL DEFAULT '', headcode TEXT NOT NULL DEFAULT '', start_date TEXT NOT NULL DEFAULT '', origin_tiploc TEXT, origin_stanox TEXT, origin_time TEXT, received_ms INTEGER NOT NULL)",
+        "CREATE INDEX IF NOT EXISTS idx_linx_act_uid ON linx_activations(uid, start_date)",
+        "CREATE TABLE IF NOT EXISTS linx_modifications (id INTEGER PRIMARY KEY AUTOINCREMENT, train_id TEXT NOT NULL, uid TEXT NOT NULL DEFAULT '', headcode TEXT NOT NULL DEFAULT '', start_date TEXT NOT NULL DEFAULT '', code TEXT NOT NULL, kind TEXT NOT NULL, tiploc TEXT, stanox TEXT, time TEXT, reason TEXT, modified_at TEXT, received_ms INTEGER NOT NULL, previous_headcode TEXT)",
+        "CREATE INDEX IF NOT EXISTS idx_linx_mod_train ON linx_modifications(train_id)",
+        "CREATE INDEX IF NOT EXISTS idx_linx_mod_received ON linx_modifications(received_ms)",
+        "CREATE TABLE IF NOT EXISTS linx_raw (id INTEGER PRIMARY KEY AUTOINCREMENT, flow TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', xml TEXT NOT NULL, received_ms INTEGER NOT NULL)",
     )
 
     fun create() {
@@ -65,7 +75,25 @@ object Schema {
         transaction {
             rawTables.forEach { exec(it) }
             addMasterAdminColumn()
+            addTdPlatformColumn()
+            addLinxPreviousHeadcodeColumn()
         }
+    }
+
+    /** td_events gained the SMART platform of the berth step; older tables lack the column. */
+    private fun JdbcTransaction.addTdPlatformColumn() {
+        val columns = queryList("PRAGMA table_info(td_events)") { it.getString(2) }
+        if ("platform" in columns) return
+        exec("ALTER TABLE td_events ADD COLUMN platform TEXT")
+        log.info("Migrated td_events.platform column")
+    }
+
+    /** linx_modifications gained the old headcode of a change of identity. */
+    private fun JdbcTransaction.addLinxPreviousHeadcodeColumn() {
+        val columns = queryList("PRAGMA table_info(linx_modifications)") { it.getString(2) }
+        if ("previous_headcode" in columns) return
+        exec("ALTER TABLE linx_modifications ADD COLUMN previous_headcode TEXT")
+        log.info("Migrated linx_modifications.previous_headcode column")
     }
 
     /** Older admin_users tables lack is_master_admin; add it and promote the bootstrap account. */

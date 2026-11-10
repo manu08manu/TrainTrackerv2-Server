@@ -14,6 +14,7 @@ import com.traintracker.server.database.scheduleDateScope
 import com.traintracker.server.database.serviceDayArgs
 import com.traintracker.server.database.serviceDaySql
 import com.traintracker.server.database.toIsoUtc
+import com.traintracker.server.kafka.LinxMovementWriter
 import com.traintracker.server.database.unitsCsv
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.response.respond
@@ -49,6 +50,8 @@ private class TrustTimes {
     val departures = mutableMapOf<String, String>()
     val arrivalSecs = mutableMapOf<String, String>()
     val departureSecs = mutableMapOf<String, String>()
+    /** Keys cancelled only because the train now starts later (change of origin). */
+    val changeOfOriginKeys = mutableSetOf<String>()
 }
 
 /** The value for a scheduled time, by time alone or else by "CRS|time". */
@@ -63,14 +66,22 @@ fun Route.serviceDetailRoutes() {
             ?: defaultServiceDate(uid)
         val route = dbQuery { serviceRoute(uid, atCrs, svcDate) }
 
-        // A train activated from a later station (change of origin) starts there.
+        // A train activated from a later station (change of origin) starts there: the calls before it stay in
+        // the list, shown as cancelled, and the page names the new origin as the start.
         val activationOriginCrs = dbQuery {
             activationsFor(listOf(uid), svcDate)[uid]?.originStanox?.let { CorpusLookup.crsFromStanox(it) }
         }
         val cps = route.callingPoints.let { all ->
-            val trimIdx = if (activationOriginCrs != null) all.indexOfFirst { it.crs == activationOriginCrs } else -1
+            val startIdx = if (activationOriginCrs != null) all.indexOfFirst { it.crs == activationOriginCrs } else -1
             val terminusCrs = all.lastOrNull { it.stopType == "LT" }?.crs
-            if (trimIdx > 0 && activationOriginCrs != terminusCrs) all.subList(trimIdx, all.size) else all
+            if (startIdx > 0 && activationOriginCrs != terminusCrs) {
+                val reason = all.take(startIdx).firstOrNull { it.isCancelled && it.cancelReason != null }?.cancelReason
+                all.mapIndexed { i, cp ->
+                    if (i < startIdx && !cp.isCancelled && cp.actualTime.isEmpty()) cp.copy(isCancelled = true, cancelReason = reason) else cp
+                }
+            } else {
+                all
+            }
         }
         if (cps.isEmpty()) return@get call.respond(HttpStatusCode.NotFound, "Service $uid not found")
 
@@ -199,7 +210,14 @@ private fun JdbcTransaction.serviceRoute(uid: String, atCrs: String, svcDate: St
             trustEntry?.third ?: if (ttCancelled) TIMETABLE_CANCELLED else null
         )
     }
-    val projected = projectDelays(propagateCancellations(cps), trust.latest.keys)
+    // Stops cancelled by a change of origin are cancelled themselves but do not cancel the rest of the run.
+    val cooIdx = cps.indices.filter { i ->
+        val cp = cps[i]
+        cp.isCancelled && (cp.scheduledTime in trust.changeOfOriginKeys || "${cp.crs}|${cp.scheduledTime}" in trust.changeOfOriginKeys)
+    }.toSet()
+    val spread = propagateCancellations(cps.mapIndexed { i, cp -> if (i in cooIdx) cp.copy(isCancelled = false, cancelReason = null) else cp })
+        .mapIndexed { i, cp -> if (i in cooIdx) cps[i] else cp }
+    val projected = projectDelays(spread, trust.latest.keys)
     val loTime = projected.firstOrNull { it.stopType == "LO" }?.effectiveTime() ?: "00:00"
     val ltTime = projected.firstOrNull { it.stopType == "LT" }?.effectiveTime() ?: "23:59"
     val ordered = if (loTime > ltTime) projected.sortedFromClock(loTime) { it.effectiveTime() } else projected
@@ -326,6 +344,7 @@ private fun JdbcTransaction.trustTimes(uid: String, svcDate: String, tdOverlay: 
             val crs = (rs.getString("crs")?.takeIf { it.isNotEmpty() } ?: CorpusLookup.crsFromStanox(rs.getString("stanox") ?: ""))
                 ?.let { TRUST_CRS_ALIASES[it] ?: it }
             for (key in listOfNotNull(scht, crs?.let { "$it|$scht" })) {
+                if (eventType == LinxMovementWriter.COO_CANCELLATION) times.changeOfOriginKeys += key
                 val existing = times.latest[key]
                 times.latest[key] = if (existing == null) {
                     Triple(actual, isCancelled, cancelReason)

@@ -20,11 +20,12 @@ object Config {
     val kafkaBootstrap: String = env("KAFKA_BOOTSTRAP")
     val kafkaUsername: String = env("KAFKA_USERNAME")
     val kafkaPassword: String = env("KAFKA_PASSWORD")
-    val kafkaGroupIdTrust: String = env("KAFKA_GROUP_ID_TRUST")
     val kafkaGroupIdVstp: String = env("KAFKA_GROUP_ID_VSTP")
     val kafkaGroupIdDarwin: String = env("KAFKA_GROUP_ID_DARWIN")
     val kafkaGroupIdAllocation: String = env("KAFKA_GROUP_ID_ALLOCATION")
     val kafkaGroupIdTd: String = env("KAFKA_GROUP_ID_TD")
+    /** NWR LINX EI: the source of train activations, movements, cancellations and changes of origin. */
+    val kafkaGroupIdLinx: String = env("KAFKA_GROUP_ID_LINX")
 
     val scheduleUrl: String = env("SCHEDULE_URL")
     val scheduleUsername: String = env("SCHEDULE_USERNAME")

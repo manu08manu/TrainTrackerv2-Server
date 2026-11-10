@@ -31,7 +31,7 @@ object TdCorrelator {
         }
         val exact = stepMs + off * 1000L
         val minute = Instant.ofEpochMilli(exact).atZone(LONDON).format(HM)
-        TdStore.enqueue(headcode, e.stanox, type, exact)
+        TdStore.enqueue(headcode, e.stanox, type, exact, e.platform)
         meet("$headcode|${e.stanox}|$type", true, minute, exact)
     }
 

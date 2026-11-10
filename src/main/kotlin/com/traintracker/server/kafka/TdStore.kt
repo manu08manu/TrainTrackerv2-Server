@@ -9,7 +9,7 @@ import org.slf4j.LoggerFactory
 
 private val log = LoggerFactory.getLogger("TdStore")
 
-/** Buffers TD-derived STANOX events and writes them to td_events in bulk; keeps 31 days. */
+/** Buffers TD-derived STANOX events (with the SMART platform, when the berth has one) and writes them to td_events in bulk; keeps 31 days. */
 object TdStore {
     private const val CHUNK = 400
     private const val MAX_BATCH = 4000
@@ -23,16 +23,17 @@ object TdStore {
     private var failed = 0L
     private var dropped = 0L
 
-    private class Row(val headcode: String, val stanox: String, val type: Char, val eventS: Long)
+    private class Row(val headcode: String, val stanox: String, val type: Char, val eventS: Long, val platform: String?)
 
-    fun enqueue(headcode: String, stanox: String, type: String, exactMs: Long) {
+    fun enqueue(headcode: String, stanox: String, type: String, exactMs: Long, platform: String = "") {
         if (headcode.length != 4 || stanox.isEmpty() || stanox.length > 6) return
         if (!headcode.all { it.isLetterOrDigit() } || !stanox.all { it.isLetterOrDigit() }) return
+        val pl = platform.trim().uppercase().takeIf { it.isNotEmpty() && it.length <= 3 && it.all(Char::isLetterOrDigit) }
         if (queued.get() >= MAX_QUEUE) {
             dropped++
             return
         }
-        queue.add(Row(headcode, stanox, if (type == "ARRIVAL") 'A' else 'D', exactMs / 1000))
+        queue.add(Row(headcode, stanox, if (type == "ARRIVAL") 'A' else 'D', exactMs / 1000, pl))
         queued.incrementAndGet()
     }
 
@@ -47,9 +48,11 @@ object TdStore {
             }
             for (chunk in batch.chunked(CHUNK)) {
                 // Values are validated alphanumerics and numbers, so the INSERT is built as text.
-                val values = chunk.joinToString(",") { "('${it.headcode}','${it.stanox}','${it.type}',${it.eventS})" }
+                val values = chunk.joinToString(",") {
+                    "('${it.headcode}','${it.stanox}','${it.type}',${it.eventS},${it.platform?.let { p -> "'$p'" } ?: "NULL"})"
+                }
                 try {
-                    transaction { exec("INSERT OR IGNORE INTO td_events (headcode, stanox, event_type, event_s) VALUES $values") }
+                    transaction { exec("INSERT OR IGNORE INTO td_events (headcode, stanox, event_type, event_s, platform) VALUES $values") }
                     written += chunk.size
                 } catch (e: Exception) {
                     failed += chunk.size

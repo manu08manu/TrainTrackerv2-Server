@@ -7,8 +7,8 @@ import com.traintracker.server.cif.SmartLookup
 import com.traintracker.server.database.AppDatabase
 import com.traintracker.server.kafka.AllocationConsumer
 import com.traintracker.server.kafka.DarwinConsumer
+import com.traintracker.server.kafka.LinxConsumer
 import com.traintracker.server.kafka.TdConsumer
-import com.traintracker.server.kafka.TrustConsumer
 import com.traintracker.server.kafka.VstpConsumer
 import com.traintracker.server.kafka.darwinPlatforms
 import com.traintracker.server.kafka.ridToUid
@@ -114,7 +114,7 @@ private suspend fun startBackgroundWork(scope: CoroutineScope) {
         log.error("CIF download failed on startup: ${e.message}")
     }
     restoreSavedState()
-    TrustConsumer.start(scope)
+    LinxConsumer.start(scope)
     VstpConsumer.start(scope)
     AllocationConsumer.start(scope)
     DarwinConsumer.start(scope)

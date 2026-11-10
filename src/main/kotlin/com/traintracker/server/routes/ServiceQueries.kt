@@ -13,6 +13,7 @@ import com.traintracker.server.database.query
 import com.traintracker.server.database.scheduleDateScope
 import com.traintracker.server.database.serviceDayArgs
 import com.traintracker.server.database.serviceDaySql
+import com.traintracker.server.kafka.LinxMovementWriter
 import com.traintracker.server.kafka.darwinPlatforms
 import java.time.LocalDate
 import org.jetbrains.exposed.v1.core.ResultRow
@@ -182,7 +183,7 @@ private fun searchResults(bestRows: List<ResultRow>, date: String): List<Service
     if (uids.isNotEmpty()) {
         try {
             query(
-                "SELECT uid, scheduled_time, actual_time, is_cancelled, cancel_reason FROM trust_movements WHERE uid IN (${placeholders(uids.size)}) AND ${serviceDaySql("event_ts")} ORDER BY event_ts DESC",
+                "SELECT uid, scheduled_time, actual_time, is_cancelled, cancel_reason, event_type FROM trust_movements WHERE uid IN (${placeholders(uids.size)}) AND ${serviceDaySql("event_ts")} ORDER BY event_ts DESC",
                 uids.toList() + serviceDayArgs(date)
             ) { rs ->
                 while (rs.next()) {
@@ -191,7 +192,7 @@ private fun searchResults(bestRows: List<ResultRow>, date: String): List<Service
                     val cancelled = rs.getBoolean("is_cancelled")
                     val entry = Triple(rs.getString("actual_time") ?: "", cancelled, ReasonCodes.resolve(rs.getString("cancel_reason")))
                     trust.putIfAbsent("$uid|$scht", entry)
-                    if (cancelled) trust.putIfAbsent(uid, entry)
+                    if (cancelled && rs.getString("event_type") != LinxMovementWriter.COO_CANCELLATION) trust.putIfAbsent(uid, entry)
                 }
             }
         } catch (e: Exception) {
