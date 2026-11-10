@@ -228,6 +228,7 @@ private fun searchResults(bestRows: List<ResultRow>, date: String): List<Service
             destCrs = destCrs,
             actualTime = trustEntry?.first ?: "",
             isCancelled = ScheduleCancellations.effectiveCancelled(uid, date, trustEntry?.second ?: false, hasAnyActualTime),
+            isRunning = hasAnyActualTime,
             cancelReason = trustEntry?.third
                 ?: if (trustEntry?.second != true && ScheduleCancellations.isCancelled(uid, date)) TIMETABLE_CANCELLED else null
         )

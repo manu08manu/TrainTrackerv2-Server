@@ -92,7 +92,7 @@ object AppDatabase {
 
     /** Hourly clean-up. The first group shares one failure path (an error stops the rest); the second does not. */
     fun pruneExpired() {
-        transaction { TrustMovements.deleteWhere { TrustMovements.eventTs less LocalDateTime.now().minusDays(30L) } }
+        transaction { TrustMovements.deleteWhere { TrustMovements.eventTs less LocalDateTime.now().minusDays(31L) } }
         transaction { TrainLocations.deleteWhere { TrainLocations.updatedAt less LocalDateTime.now().minusHours(24L) } }
         transaction { AllocationConsists.deleteWhere { AllocationConsists.updatedAt less LocalDateTime.now(ZoneOffset.UTC).minusDays(30L) } }
         transaction { AllocationLegs.deleteWhere { AllocationLegs.updatedAt less LocalDateTime.now().minusDays(30L) } }
@@ -102,7 +102,7 @@ object AppDatabase {
             "DELETE FROM darwin_platforms WHERE updated_at < datetime('now', '-24 hours')",
             "DELETE FROM darwin_rid_uid WHERE updated_at < datetime('now', '-30 days')",
             "DELETE FROM hsp_cache WHERE cached_at < datetime('now', '-30 days') OR cache_key LIKE 'act:%'",
-            "DELETE FROM train_activations WHERE updated_at < datetime('now', '-30 days')",
+            "DELETE FROM train_activations WHERE updated_at < datetime('now', '-31 days')",
             "DELETE FROM schedules WHERE stp_indicator = 'N' AND schedule_end_date < date('now', '-30 days')",
             "DELETE FROM cif_change_alerts WHERE dismissed_at IS NOT NULL AND dismissed_at < datetime('now', '-7 days')",
             "DELETE FROM feedback WHERE dismissed_at IS NOT NULL AND dismissed_at < datetime('now', '-30 days')",
