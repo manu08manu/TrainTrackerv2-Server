@@ -1,5 +1,7 @@
 package com.traintracker.server.kafka
 
+import com.traintracker.server.Retention
+
 import java.time.Instant
 import java.time.temporal.ChronoUnit
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -9,12 +11,12 @@ import org.slf4j.LoggerFactory
 
 private val log = LoggerFactory.getLogger("TdStore")
 
-/** Buffers TD-derived STANOX events (with the SMART platform, when the berth has one) and writes them to td_events in bulk; keeps 31 days. */
+/** Buffers TD-derived STANOX events (with the SMART platform, when the berth has one) and writes them to td_events in bulk; keeps [Retention.TD_EVENT_DAYS] days. */
 object TdStore {
     private const val CHUNK = 400
     private const val MAX_BATCH = 4000
     private const val MAX_QUEUE = 100_000
-    private const val RETENTION_DAYS = 31L
+    private const val RETENTION_DAYS = Retention.TD_EVENT_DAYS
     private val queue = ConcurrentLinkedQueue<Row>()
     private val queued = AtomicInteger()
     private var lastPrune = 0L

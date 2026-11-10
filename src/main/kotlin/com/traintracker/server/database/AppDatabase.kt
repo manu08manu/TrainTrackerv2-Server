@@ -1,5 +1,7 @@
 package com.traintracker.server.database
 
+import com.traintracker.server.Retention
+
 import com.traintracker.server.Config
 import com.traintracker.server.cif.CorpusLookup
 import com.traintracker.server.routes.StatusResponse
@@ -92,23 +94,23 @@ object AppDatabase {
 
     /** Hourly clean-up. The first group shares one failure path (an error stops the rest); the second does not. */
     fun pruneExpired() {
-        transaction { Movements.deleteWhere { Movements.eventTs less LocalDateTime.now().minusDays(31L) } }
+        transaction { Movements.deleteWhere { Movements.eventTs less LocalDateTime.now().minusDays(Retention.MOVEMENT_DAYS) } }
         transaction { TrainLocations.deleteWhere { TrainLocations.updatedAt less LocalDateTime.now().minusHours(24L) } }
-        transaction { AllocationConsists.deleteWhere { AllocationConsists.updatedAt less LocalDateTime.now(ZoneOffset.UTC).minusDays(30L) } }
-        transaction { AllocationLegs.deleteWhere { AllocationLegs.updatedAt less LocalDateTime.now().minusDays(30L) } }
-        transaction { AllocationHistory.deleteWhere { AllocationHistory.recordedAt less LocalDateTime.now().minusDays(30L) } }
-        transaction { AllocationChanges.deleteWhere { AllocationChanges.changedAt less LocalDateTime.now(ZoneOffset.UTC).minusDays(30L) } }
+        transaction { AllocationConsists.deleteWhere { AllocationConsists.updatedAt less LocalDateTime.now(ZoneOffset.UTC).minusDays(Retention.ALLOCATION_DAYS) } }
+        transaction { AllocationLegs.deleteWhere { AllocationLegs.updatedAt less LocalDateTime.now().minusDays(Retention.ALLOCATION_DAYS) } }
+        transaction { AllocationHistory.deleteWhere { AllocationHistory.recordedAt less LocalDateTime.now().minusDays(Retention.ALLOCATION_DAYS) } }
+        transaction { AllocationChanges.deleteWhere { AllocationChanges.changedAt less LocalDateTime.now(ZoneOffset.UTC).minusDays(Retention.ALLOCATION_DAYS) } }
         listOf(
             "DELETE FROM darwin_platforms WHERE updated_at < datetime('now', '-24 hours')",
-            "DELETE FROM train_activations WHERE updated_at < datetime('now', '-31 days')",
-            "DELETE FROM schedules WHERE stp_indicator = 'N' AND schedule_end_date < date('now', '-30 days')",
+            "DELETE FROM train_activations WHERE updated_at < datetime('now', '-${Retention.TRAIN_ACTIVATION_DAYS} days')",
+            "DELETE FROM schedules WHERE stp_indicator = 'N' AND schedule_end_date < date('now', '-${Retention.EXPIRED_SCHEDULE_DAYS} days')",
             "DELETE FROM cif_change_alerts WHERE dismissed_at IS NOT NULL AND dismissed_at < datetime('now', '-7 days')",
-            "DELETE FROM feedback WHERE dismissed_at IS NOT NULL AND dismissed_at < datetime('now', '-30 days')",
+            "DELETE FROM feedback WHERE dismissed_at IS NOT NULL AND dismissed_at < datetime('now', '-${Retention.FEEDBACK_DISMISSED_DAYS} days')",
             // linx_movements / linx_activations duplicate movements / train_activations; they are only
             // needed for the TD platform fill (15 minutes) and debugging.
             "DELETE FROM linx_movements WHERE received_ms < (strftime('%s','now') - 2*86400) * 1000",
             "DELETE FROM linx_activations WHERE received_ms < (strftime('%s','now') - 2*86400) * 1000",
-            "DELETE FROM linx_modifications WHERE received_ms < (strftime('%s','now') - 31*86400) * 1000",
+            "DELETE FROM linx_modifications WHERE received_ms < (strftime('%s','now') - ${Retention.LINX_MODIFICATION_DAYS}*86400) * 1000",
             "DELETE FROM linx_raw WHERE received_ms < (strftime('%s','now') - 7*86400) * 1000",
         ).forEach { sql ->
             try {

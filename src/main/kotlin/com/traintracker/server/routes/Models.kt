@@ -182,6 +182,8 @@ data class ServiceDetailResponse(
     val nextWorkingAll: List<StockNeighbourCandidate> = emptyList(),
     val activatedAt: String? = null,
     val activationOrigin: String? = null,
+    /** TIPLOC the train now ends at after LINX cut it short to a changed location (code 93), else null. */
+    val movedDestination: String? = null,
     val legs: List<UnitLegResponse> = emptyList(),
     val serviceDate: String? = null
 )

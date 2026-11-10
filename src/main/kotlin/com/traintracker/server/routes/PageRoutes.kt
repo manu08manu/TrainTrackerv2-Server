@@ -50,7 +50,8 @@ fun Route.pageRoutes() {
         "/toc/{tocCode}/{date}",
         "/headcode/{hc}",
         "/headcode/{hc}/{date}",
-        "/pride"
+        "/pride",
+        "/league"
     ).forEach { path ->
         get(path) { call.serveStaticHtml(INDEX_HTML) }
     }
