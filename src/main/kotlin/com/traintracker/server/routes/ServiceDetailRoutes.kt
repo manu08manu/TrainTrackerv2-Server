@@ -12,6 +12,7 @@ import com.traintracker.server.database.query
 import com.traintracker.server.database.queryFirst
 import com.traintracker.server.database.scheduleDateScope
 import com.traintracker.server.database.serviceDayArgs
+import com.traintracker.server.database.queryList
 import com.traintracker.server.database.serviceDaySql
 import com.traintracker.server.database.toIsoUtc
 import com.traintracker.server.kafka.LinxMovementWriter
@@ -37,6 +38,10 @@ private class ServiceRoute(
     val tocCode: String,
     val tiplocNames: Map<String, String?>,
     val callingPoints: List<CallingPointResponse>,
+    /** TIPLOC the train now starts from after a change of location at its start (code 95), else null. */
+    val movedOrigin: String? = null,
+    /** The 95's reason, as shown. */
+    val movedOriginReason: String? = null,
 )
 
 /**
@@ -66,7 +71,8 @@ private class MovementTimes {
         if (crs == null || time.isNullOrEmpty()) return null
         return reports.asSequence()
             .filter { it.crs == crs && !it.cancelled && it.actual.isNotEmpty() }
-            .map { it to kotlin.math.abs(minutesLate(it.scheduled, time)) }
+            // A report with no booked time (a location the train was moved to) matches on location alone.
+            .map { it to if (it.scheduled.isEmpty()) 0 else kotlin.math.abs(minutesLate(it.scheduled, time)) }
             .filter { it.second <= 10 }
             .minWithOrNull(compareBy<Pair<Report, Int>> { it.first.eventType != eventType }.thenBy { it.second })?.first
     }
@@ -86,10 +92,10 @@ fun Route.serviceDetailRoutes() {
 
         // A train activated from a later station (change of origin) starts there: the calls before it stay in
         // the list, shown as cancelled, and the page names the new origin as the start.
-        val activationOriginCrs = dbQuery {
+        val activationOriginCrs = route.movedOrigin?.let { CorpusLookup.crsFromTiploc(it) } ?: dbQuery {
             activationsFor(listOf(uid), svcDate)[uid]?.originStanox?.let { CorpusLookup.crsFromStanox(it) }
         }
-        val cps = cancelBeforeOrigin(route.callingPoints, activationOriginCrs)
+        val cps = cancelBeforeOrigin(route.callingPoints, activationOriginCrs, route.movedOriginReason)
         if (cps.isEmpty()) return@get call.respond(HttpStatusCode.NotFound, "Service $uid not found")
 
         // Split at the requested station into calls before it and from it onwards.
@@ -145,7 +151,7 @@ fun Route.serviceDetailRoutes() {
                 nextWorkingDate = nextWorkings.firstOrNull()?.third,
                 nextWorkingAll = nextWorkings.map { StockNeighbourCandidate(it.first, it.second, it.third) },
                 activatedAt = activation?.updatedAt?.let { toIsoUtc(it) },
-                activationOrigin = activation?.originStanox?.let { CorpusLookup.tiplocFromStanox(it) },
+                activationOrigin = route.movedOrigin ?: activation?.originStanox?.let { CorpusLookup.tiplocFromStanox(it) },
                 legs = legData.groups.map { g ->
                     UnitLegResponse(
                         g.fromTiploc,
@@ -181,7 +187,8 @@ private fun JdbcTransaction.serviceRoute(uid: String, atCrs: String, svcDate: St
     firstRow?.let { CorpusLookup.recordMissingTscIfNoOverride(it[Schedules.tsc], headcode, uid) }
     val moves = if (headcode.any { it.isLetterOrDigit() }) movementTimes(uid, svcDate, tdOverlay) else MovementTimes()
 
-    val tiplocs = rows.map { it[Schedules.tiploc] }.toSet()
+    val (changes, movedOrigin, movedOriginReason) = locationChanges(uid, svcDate)
+    val tiplocs = rows.map { it[Schedules.tiploc] }.toSet() + changes.values
     val tiplocNames = CorpusLookup.namesFromTiplocs(tiplocs)
     CorpusLookup.recordMissingFromNames(tiplocs, headcode, uid)
 
@@ -189,22 +196,25 @@ private fun JdbcTransaction.serviceRoute(uid: String, atCrs: String, svcDate: St
     val movementPlatforms = AppDatabase.movementPlatforms(listOf(uid))
     val ttCancelled = timetableCancelled && moves.arrivals.isEmpty() && moves.departures.isEmpty()
     val cps = rows.map { row ->
-        val tiploc = row[Schedules.tiploc]
-        val crs = row[Schedules.crs]?.takeIf { it.isNotEmpty() } ?: CorpusLookup.crsFromTiploc(tiploc)
+        val booked = row[Schedules.tiploc]
+        val tiploc = changes[booked] ?: booked
+        val bookedPlatform = row[Schedules.platform].takeIf { tiploc == booked }
+        val crs = (if (tiploc == booked) row[Schedules.crs]?.takeIf { it.isNotEmpty() } else null) ?: CorpusLookup.crsFromTiploc(tiploc)
         val scht = row[Schedules.scheduledTime]
         val schedArr = row[Schedules.scheduledArrival]
         val schedDep = row[Schedules.scheduledDeparture]
         val exactMove = moves.latest[scht] ?: crs?.let { moves.latest["$it|$scht"] }
-        // No exact match: the nearest report here (arrival at the terminus, departure elsewhere).
+        // No exact report with a time (or only a cancellation): the nearest report here (arrival at the
+        // terminus, departure elsewhere).
         val terminus = row[Schedules.stopType] == "LT"
-        val near = if (exactMove == null) {
+        val near = if (exactMove?.first.isNullOrEmpty()) {
             moves.nearest(crs, if (terminus) schedArr ?: scht else schedDep ?: scht, if (terminus) "ARRIVAL" else "DEPARTURE")
         } else {
             null
         }
         val nearArr = near?.takeIf { it.eventType == "ARRIVAL" }
         val nearDep = near?.takeIf { it.eventType == "DEPARTURE" }
-        val (platform, confirmed) = resolvePlatform(uid, tiploc, crs, row[Schedules.platform], darwinDb[tiploc], movementPlatforms)
+        val (platform, confirmed) = resolvePlatform(uid, tiploc, crs, bookedPlatform, darwinDb[tiploc], movementPlatforms)
         CallingPointResponse(
             tiploc,
             crs,
@@ -214,16 +224,17 @@ private fun JdbcTransaction.serviceRoute(uid: String, atCrs: String, svcDate: St
             schedDep,
             platform,
             confirmed,
-            row[Schedules.platform],
+            bookedPlatform,
             row[Schedules.isPass],
             row[Schedules.stopType],
-            exactMove?.first ?: near?.actual ?: "",
+            exactMove?.first?.ifEmpty { null } ?: near?.actual ?: "",
             moves.arrivals.at(schedArr, crs) ?: nearArr?.actual ?: "",
             moves.departures.at(schedDep, crs) ?: moves.departures.at(scht, crs) ?: nearDep?.actual ?: "",
             moves.arrivalSecs.at(schedArr, crs) ?: nearArr?.actualSec ?: "",
             moves.departureSecs.at(schedDep, crs) ?: moves.departureSecs.at(scht, crs) ?: nearDep?.actualSec ?: "",
             (exactMove?.second ?: false) || ttCancelled,
-            exactMove?.third ?: if (ttCancelled) TIMETABLE_CANCELLED else null
+            exactMove?.third ?: if (ttCancelled) TIMETABLE_CANCELLED else null,
+            replaces = if (tiploc != booked) tiplocNames[booked] ?: booked else null,
         )
     }
     val spread = applyCancellations(cps) { cp ->
@@ -235,7 +246,7 @@ private fun JdbcTransaction.serviceRoute(uid: String, atCrs: String, svcDate: St
     val loTime = projected.firstOrNull { it.stopType == "LO" }?.effectiveTime() ?: "00:00"
     val ltTime = projected.firstOrNull { it.stopType == "LT" }?.effectiveTime() ?: "23:59"
     val ordered = if (loTime > ltTime) projected.sortedFromClock(loTime) { it.effectiveTime() } else projected
-    return ServiceRoute(headcode, tocCode, tiplocNames, RoutePoints.merge(ordered, uid, svcDate, headcode))
+    return ServiceRoute(headcode, tocCode, tiplocNames, RoutePoints.followChangedLocations(RoutePoints.merge(ordered, uid, svcDate, headcode), uid, svcDate, headcode), movedOrigin, movedOriginReason)
 }
 
 /**
@@ -335,6 +346,40 @@ private fun trimToDestination(rows: List<ResultRow>): List<ResultRow> {
     return if (finalIdx >= 0) deduped.subList(0, finalIdx + 1) else deduped
 }
 
+/**
+ * LINX changes of location for the service day, from S513 codes 06 and 95. There is no published code list:
+ * the meanings are inferred from live messages.
+ *  - 06 lists the booked location with ModificationStatusIndicator 03 and the one used instead with 04: the
+ *    first of the pair is booked TIPLOC -> TIPLOC used instead (9H08: West Drayton instead of Heathrow T2 & 3).
+ *  - 95 at a booked location means the train now starts from its replacement ([LocationChanges.movedOrigin]):
+ *    9H08 terminated at West Drayton, so 9U27, which it forms, started there instead of Heathrow.
+ * A later message for the same location wins.
+ */
+private data class LocationChanges(val replaced: Map<String, String>, val movedOrigin: String?, val movedOriginReason: String?)
+
+private fun JdbcTransaction.locationChanges(uid: String, svcDate: String): LocationChanges {
+    val replaced = mutableMapOf<String, String>()
+    var startMovedFrom: String? = null
+    var startMovedTo: String? = null
+    var startMovedReason: String? = null
+    val messages = queryList(
+        "SELECT locations, reason FROM linx_modifications WHERE uid = ? AND start_date = ? AND code IN ('06', '95') AND locations IS NOT NULL ORDER BY id",
+        listOf(uid, svcDate)
+    ) { it.getString(1) to it.getString(2) }
+    for ((message, reason) in messages) {
+        val entries = message.split(';').map { it.split('|') }.filter { it.size >= 2 && it[0].isNotEmpty() }
+        fun marked(indicator: String) = entries.filter { it[1] == indicator }.map { it[0] }
+        marked("03").zip(marked("04")).forEach { (from, to) -> replaced[from] = to }
+        marked("95").firstOrNull()?.let { from ->
+            startMovedFrom = from
+            startMovedTo = marked("04").firstOrNull()
+            startMovedReason = ReasonCodes.resolve(reason)
+        }
+    }
+    val movedOrigin = startMovedFrom?.let { from -> startMovedTo ?: replaced[from] }
+    return LocationChanges(replaced, movedOrigin, startMovedReason.takeIf { movedOrigin != null })
+}
+
 /** Movements for the service day, with TD times (to the second) where they match. */
 private fun JdbcTransaction.movementTimes(uid: String, svcDate: String, tdOverlay: TdOverlay): MovementTimes {
     val times = MovementTimes()
@@ -348,7 +393,7 @@ private fun JdbcTransaction.movementTimes(uid: String, svcDate: String, tdOverla
         listOfNotNull(uid, cancelledOnlyTrainId) + serviceDayArgs(svcDate)
     ) { rs ->
         while (rs.next()) {
-            val scht = rs.getString("scheduled_time") ?: continue
+            val scht = rs.getString("scheduled_time") ?: ""
             val isCancelled = rs.getBoolean("is_cancelled")
             val cancelReason = ReasonCodes.resolve(rs.getString("cancel_reason"))
             val eventType = rs.getString("event_type") ?: ""
@@ -358,6 +403,8 @@ private fun JdbcTransaction.movementTimes(uid: String, svcDate: String, tdOverla
             val crs = (rs.getString("crs")?.takeIf { it.isNotEmpty() } ?: CorpusLookup.crsFromStanox(rs.getString("stanox") ?: ""))
                 ?.let { MOVEMENT_CRS_ALIASES[it] ?: it }
             if (crs != null) times.reports += MovementTimes.Report(crs, scht, actual, actualSec, eventType, isCancelled, cancelReason)
+            // A report with no booked time (a location the train was moved to) is only matched by location.
+            if (scht.isEmpty()) continue
             for (key in listOfNotNull(scht, crs?.let { "$it|$scht" })) {
                 if (eventType == LinxMovementWriter.COO_CANCELLATION) times.changeOfOriginKeys += key
                 val existing = times.latest[key]
@@ -379,7 +426,8 @@ private fun JdbcTransaction.movementTimes(uid: String, svcDate: String, tdOverla
 
 /**
  * Cancellations as shown: [propagateCancellations], except that a call cancelled by a change of origin
- * ([isChangeOfOrigin]) stays cancelled itself without cancelling the rest of the run.
+ * ([isChangeOfOrigin]) stays cancelled itself without cancelling the rest of the run, and a call that
+ * reported a time is never shown cancelled itself.
  */
 internal fun applyCancellations(
     cps: List<CallingPointResponse>,
@@ -387,21 +435,34 @@ internal fun applyCancellations(
 ): List<CallingPointResponse> {
     val cooIdx = cps.indices.filter { cps[it].isCancelled && isChangeOfOrigin(cps[it]) }.toSet()
     return propagateCancellations(cps.mapIndexed { i, cp -> if (i in cooIdx) cp.copy(isCancelled = false, cancelReason = null) else cp })
-        .mapIndexed { i, cp -> if (i in cooIdx) cps[i] else cp }
+        .mapIndexed { i, cp ->
+            when {
+                i in cooIdx -> cps[i]
+                // A call that reported a time ran (e.g. cancelled en route there, so it terminated there); the
+                // cancellation still applies to the calls after it.
+                cp.isCancelled && cp.actualTime.isNotEmpty() -> cp.copy(isCancelled = false, cancelReason = null)
+                else -> cp
+            }
+        }
 }
 
 /**
  * A train activated from a later station ([activationOriginCrs], after a change of origin) starts there: the
  * calls before it stay in the list but are cancelled (unless they somehow ran), with the reason given on any
- * of them. Unchanged when the activation origin is the timetabled one, the terminus, or not in the list.
+ * of them, else [reason]. Unchanged when the activation origin is the timetabled one, the terminus, or not in
+ * the list.
  */
-internal fun cancelBeforeOrigin(all: List<CallingPointResponse>, activationOriginCrs: String?): List<CallingPointResponse> {
+internal fun cancelBeforeOrigin(
+    all: List<CallingPointResponse>,
+    activationOriginCrs: String?,
+    reason: String? = null,
+): List<CallingPointResponse> {
     val startIdx = if (activationOriginCrs != null) all.indexOfFirst { it.crs == activationOriginCrs } else -1
     val terminusCrs = all.lastOrNull { it.stopType == "LT" }?.crs
     if (startIdx <= 0 || activationOriginCrs == terminusCrs) return all
-    val reason = all.take(startIdx).firstOrNull { it.isCancelled && it.cancelReason != null }?.cancelReason
+    val given = all.take(startIdx).firstOrNull { it.isCancelled && it.cancelReason != null }?.cancelReason ?: reason
     return all.mapIndexed { i, cp ->
-        if (i < startIdx && !cp.isCancelled && cp.actualTime.isEmpty()) cp.copy(isCancelled = true, cancelReason = reason) else cp
+        if (i < startIdx && !cp.isCancelled && cp.actualTime.isEmpty()) cp.copy(isCancelled = true, cancelReason = given) else cp
     }
 }
 

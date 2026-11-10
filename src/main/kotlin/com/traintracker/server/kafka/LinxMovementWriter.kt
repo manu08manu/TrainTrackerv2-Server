@@ -19,7 +19,7 @@ import org.slf4j.LoggerFactory
 private val log = LoggerFactory.getLogger("LinxMovementWriter")
 
 /**
- * LINX EI replaces the retired TRUST movements feed: it writes movements and
+ * TrainTracker uses LINX EI instead of the TRUST movements feed (both remain available): it writes movements and
  * train_activations in TRUST's shape (so every reader keeps working), and feeds live locations, the
  * train ID -> uid map, the TD correlation and the missing-location checks.
  *

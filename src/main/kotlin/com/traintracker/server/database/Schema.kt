@@ -54,7 +54,7 @@ object Schema {
         "CREATE INDEX IF NOT EXISTS idx_linx_mvt_received ON linx_movements(received_ms)",
         "CREATE TABLE IF NOT EXISTS linx_activations (train_id TEXT PRIMARY KEY, uid TEXT NOT NULL DEFAULT '', headcode TEXT NOT NULL DEFAULT '', start_date TEXT NOT NULL DEFAULT '', origin_tiploc TEXT, origin_stanox TEXT, origin_time TEXT, received_ms INTEGER NOT NULL)",
         "CREATE INDEX IF NOT EXISTS idx_linx_act_uid ON linx_activations(uid, start_date)",
-        "CREATE TABLE IF NOT EXISTS linx_modifications (id INTEGER PRIMARY KEY AUTOINCREMENT, train_id TEXT NOT NULL, uid TEXT NOT NULL DEFAULT '', headcode TEXT NOT NULL DEFAULT '', start_date TEXT NOT NULL DEFAULT '', code TEXT NOT NULL, kind TEXT NOT NULL, tiploc TEXT, stanox TEXT, time TEXT, reason TEXT, modified_at TEXT, received_ms INTEGER NOT NULL, previous_headcode TEXT)",
+        "CREATE TABLE IF NOT EXISTS linx_modifications (id INTEGER PRIMARY KEY AUTOINCREMENT, train_id TEXT NOT NULL, uid TEXT NOT NULL DEFAULT '', headcode TEXT NOT NULL DEFAULT '', start_date TEXT NOT NULL DEFAULT '', code TEXT NOT NULL, kind TEXT NOT NULL, tiploc TEXT, stanox TEXT, time TEXT, reason TEXT, modified_at TEXT, received_ms INTEGER NOT NULL, previous_headcode TEXT, locations TEXT)",
         "CREATE INDEX IF NOT EXISTS idx_linx_mod_train ON linx_modifications(train_id)",
         "CREATE INDEX IF NOT EXISTS idx_linx_mod_received ON linx_modifications(received_ms)",
         // Punctuality: calls per station, operator and half-hour of each finished day (routes/Punctuality.kt)
@@ -83,7 +83,7 @@ object Schema {
             rawTables.forEach { exec(it) }
             addMasterAdminColumn()
             addTdPlatformColumn()
-            addLinxPreviousHeadcodeColumn()
+            addLinxModificationColumns()
         }
     }
 
@@ -96,7 +96,7 @@ object Schema {
     }
 
     /**
-     * trust_movements was renamed movements when LINX replaced TRUST (2026-11). Runs before the Exposed
+     * trust_movements was renamed movements when TrainTracker switched from TRUST to LINX (2026-11). Runs before the Exposed
      * migration so it never creates an empty movements table. The pk_trust_movements constraint and the
      * idx_trust_* indexes keep their names: renaming an index means rebuilding it.
      */
@@ -125,12 +125,14 @@ object Schema {
         }
     }
 
-    /** linx_modifications gained the old headcode of a change of identity. */
-    private fun JdbcTransaction.addLinxPreviousHeadcodeColumn() {
+    /** linx_modifications gained the old headcode of a change of identity, then every modified location. */
+    private fun JdbcTransaction.addLinxModificationColumns() {
         val columns = queryList("PRAGMA table_info(linx_modifications)") { it.getString(2) }
-        if ("previous_headcode" in columns) return
-        exec("ALTER TABLE linx_modifications ADD COLUMN previous_headcode TEXT")
-        log.info("Migrated linx_modifications.previous_headcode column")
+        for (column in listOf("previous_headcode", "locations")) {
+            if (column in columns) continue
+            exec("ALTER TABLE linx_modifications ADD COLUMN $column TEXT")
+            log.info("Migrated linx_modifications.$column column")
+        }
     }
 
     /** Older admin_users tables lack is_master_admin; add it and promote the bootstrap account. */

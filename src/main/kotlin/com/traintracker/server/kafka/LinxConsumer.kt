@@ -17,8 +17,8 @@ import org.slf4j.LoggerFactory
 private val log = LoggerFactory.getLogger("LinxConsumer")
 
 /**
- * Network Rail LINX EI (TAF/TSI XML), the successor to the TRUST movements feed and the source of all train
- * running data. Messages are parsed by [LinxParser]; each poll is stored in the linx_* tables (kept briefly,
+ * Network Rail LINX EI (TAF/TSI XML): an alternative to the TRUST movements feed, which TrainTracker uses
+ * instead of it as its only source of train running data (both feeds remain available). Messages are parsed by [LinxParser]; each poll is stored in the linx_* tables (kept briefly,
  * for the TD platform fill and for debugging) and handed to [LinxMovementWriter], which writes movements /
  * train_activations in UK clock time (see [LinxClock]).
  *
@@ -36,6 +36,7 @@ object LinxConsumer {
     const val TOPIC = "prod-1033-NWR-LINX-EI1_0"
     private const val RAW_SAMPLE_LIMIT = 200 // raw messages kept per minute for unknown flows / failures
     private const val CLOCK_VOTES_NEEDED = 20
+    private val HANDLED_MODIFICATIONS = setOf("91", "92", "94", "96", "07", "06", "95")
 
     private val pending = ConcurrentLinkedQueue<LinxMessage>()
     private val counts = ConcurrentHashMap<String, AtomicLong>()
@@ -109,6 +110,10 @@ object LinxConsumer {
             is LinxRaw -> raw(m)
             else -> pending.add(m)
         }
+        // Modification codes not yet acted on (e.g. 06, 93) are kept whole, to learn their layout.
+        if (parsed.message is LinxModification && parsed.message.code !in HANDLED_MODIFICATIONS) {
+            raw(LinxRaw(flow, "modification ${parsed.message.code}", xml, kafkaMs))
+        }
     }
 
     private fun raw(m: LinxRaw) {
@@ -152,8 +157,8 @@ object LinxConsumer {
                             listOf(p.trainId, p.uid, p.headcode, p.startDate, p.originTiploc, p.originStanox, p.originTime, p.receivedMs.toString())
                         )
                         is LinxModification -> execUpdate(
-                            "INSERT INTO linx_modifications (train_id, uid, headcode, start_date, code, kind, tiploc, stanox, time, reason, modified_at, received_ms, previous_headcode) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                            listOf(p.trainId, p.uid, p.headcode, p.startDate, p.code, p.kind, p.tiploc, p.stanox, p.time, p.reason, p.modifiedAt, p.receivedMs.toString(), p.previousHeadcode)
+                            "INSERT INTO linx_modifications (train_id, uid, headcode, start_date, code, kind, tiploc, stanox, time, reason, modified_at, received_ms, previous_headcode, locations) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            listOf(p.trainId, p.uid, p.headcode, p.startDate, p.code, p.kind, p.tiploc, p.stanox, p.time, p.reason, p.modifiedAt, p.receivedMs.toString(), p.previousHeadcode, p.locations)
                         )
                         is LinxRaw -> execUpdate(
                             "INSERT INTO linx_raw (flow, note, xml, received_ms) VALUES (?,?,?,?)",
