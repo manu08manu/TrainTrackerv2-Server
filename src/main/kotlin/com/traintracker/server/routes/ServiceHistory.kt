@@ -119,7 +119,7 @@ internal fun JdbcTransaction.serviceHistory(uid: String): ServiceHistoryResponse
         }
     }
     query(
-        "SELECT train_id, stanox, scheduled_time, actual_time, is_cancelled, cancel_reason, event_ts FROM trust_movements WHERE uid = ? AND event_ts >= ? AND event_ts < ? ORDER BY event_ts",
+        "SELECT train_id, stanox, scheduled_time, actual_time, is_cancelled, cancel_reason, event_ts FROM movements WHERE uid = ? AND event_ts >= ? AND event_ts < ? ORDER BY event_ts",
         listOf(uid, since, until)
     ) { rs ->
         while (rs.next()) {
@@ -163,7 +163,7 @@ internal fun JdbcTransaction.serviceHistory(uid: String): ServiceHistoryResponse
         ?: CorpusLookup.tiplocFromStanox(stanox)?.let { CorpusLookup.nameFromTiploc(it) }
 
     // Days before TRUST data begins cannot be judged.
-    val dataStart = queryFirst("SELECT MIN(event_ts) FROM trust_movements") { parseTs(it.getString(1)) }
+    val dataStart = queryFirst("SELECT MIN(event_ts) FROM movements") { parseTs(it.getString(1)) }
         ?.toLocalDate()?.plusDays(1) ?: from
 
     val days = generateSequence(from) { it.plusDays(1) }.takeWhile { !it.isAfter(to) }.map { date ->

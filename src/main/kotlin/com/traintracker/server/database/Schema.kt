@@ -12,7 +12,7 @@ object Schema {
     const val MASTER_ADMIN_BOOTSTRAP_EMAIL = "tannajaisal@gmail.com"
 
     private val exposedTables = arrayOf(
-        HspCache, Schedules, TrustMovements, TrainLocations, CifMeta, AllocationConsists, AllocationLegs,
+        HspCache, Schedules, Movements, TrainLocations, CifMeta, AllocationConsists, AllocationLegs,
         HeadcodeAliases, AllocationHistory, AllocationChanges, CifAssociations, DarwinPlatforms, DarwinRidUid,
         TrainActivations,
     )
@@ -61,6 +61,7 @@ object Schema {
     )
 
     fun create() {
+        renameTrustMovements()
         transaction {
             MigrationUtils.statementsRequiredForDatabaseMigration(*exposedTables).forEach { sql ->
                 if (sql.uppercase().contains("DROP ")) {
@@ -86,6 +87,19 @@ object Schema {
         if ("platform" in columns) return
         exec("ALTER TABLE td_events ADD COLUMN platform TEXT")
         log.info("Migrated td_events.platform column")
+    }
+
+    /**
+     * trust_movements was renamed movements when LINX replaced TRUST (2026-11). Runs before the Exposed
+     * migration so it never creates an empty movements table. The pk_trust_movements constraint and the
+     * idx_trust_* indexes keep their names: renaming an index means rebuilding it.
+     */
+    private fun renameTrustMovements() = transaction {
+        val tables = queryList("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('trust_movements', 'movements')") { it.getString(1) }
+        if ("trust_movements" in tables && "movements" !in tables) {
+            exec("ALTER TABLE trust_movements RENAME TO movements")
+            log.info("Renamed trust_movements to movements")
+        }
     }
 
     /** linx_modifications gained the old headcode of a change of identity. */

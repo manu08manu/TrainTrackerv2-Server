@@ -5,7 +5,7 @@ import com.traintracker.server.cif.SmartLookup
 import com.traintracker.server.database.AppDatabase
 import com.traintracker.server.database.MovementBatch
 import com.traintracker.server.database.Schedules
-import com.traintracker.server.database.TrustMovements
+import com.traintracker.server.database.Movements
 import com.traintracker.server.database.effectiveDateFor
 import com.traintracker.server.database.scheduleDateScope
 import org.jetbrains.exposed.v1.core.and
@@ -19,7 +19,7 @@ import org.slf4j.LoggerFactory
 private val log = LoggerFactory.getLogger("LinxMovementWriter")
 
 /**
- * LINX EI replaces the retired TRUST movements feed: it writes trust_movements and
+ * LINX EI replaces the retired TRUST movements feed: it writes movements and
  * train_activations in TRUST's shape (so every reader keeps working), and feeds live locations, the
  * train ID -> uid map, the TD correlation and the missing-location checks.
  *
@@ -81,8 +81,8 @@ internal object LinxMovementWriter {
         val resolvedUid = uid.ifEmpty { trainIdToRid[trainId] ?: "" }
         if (resolvedUid.isNotEmpty() && time.isNotEmpty()) {
             transaction {
-                TrustMovements.update({
-                    (TrustMovements.uid eq resolvedUid) and (TrustMovements.scheduledTime eq time) and (TrustMovements.isCancelled eq true)
+                Movements.update({
+                    (Movements.uid eq resolvedUid) and (Movements.scheduledTime eq time) and (Movements.isCancelled eq true)
                 }) {
                     it[isCancelled] = false
                     it[cancelReason] = null
@@ -109,7 +109,7 @@ internal object LinxMovementWriter {
         try {
             // A later change of origin replaces an earlier one (it can even move the start back).
             transaction {
-                TrustMovements.deleteWhere { (TrustMovements.trainId eq trainId) and (TrustMovements.eventType eq COO_CANCELLATION) }
+                Movements.deleteWhere { (Movements.trainId eq trainId) and (Movements.eventType eq COO_CANCELLATION) }
             }
             val date = startDate.takeIf { it.length == 10 } ?: java.time.LocalDate.now().toString()
             val earlier = transaction {
@@ -154,8 +154,8 @@ internal object LinxMovementWriter {
     fun platform(trainId: String, stanox: String?, eventType: String, platform: String) {
         if (stanox == null) return
         val type = if (eventType == "DEPARTURE") "DEPARTURE" else "ARRIVAL"
-        TrustMovements.update({
-            (TrustMovements.trainId eq trainId) and (TrustMovements.stanox eq stanox) and (TrustMovements.eventType eq type)
-        }) { it[TrustMovements.platform] = platform }
+        Movements.update({
+            (Movements.trainId eq trainId) and (Movements.stanox eq stanox) and (Movements.eventType eq type)
+        }) { it[Movements.platform] = platform }
     }
 }

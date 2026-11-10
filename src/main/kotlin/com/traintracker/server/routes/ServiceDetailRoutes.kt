@@ -326,11 +326,11 @@ private fun JdbcTransaction.trustTimes(uid: String, svcDate: String, tdOverlay: 
     val times = TrustTimes()
     // When a train ID has only cancellations, use that train ID's events alone.
     val cancelledOnlyTrainId = queryFirst(
-        "SELECT train_id FROM trust_movements WHERE uid=? AND ${serviceDaySql("event_ts")} GROUP BY train_id HAVING $CANCELLED_ONLY_SQL LIMIT 1",
+        "SELECT train_id FROM movements WHERE uid=? AND ${serviceDaySql("event_ts")} GROUP BY train_id HAVING $CANCELLED_ONLY_SQL LIMIT 1",
         listOf(uid) + serviceDayArgs(svcDate)
     ) { it.getString(1) }
     query(
-        "SELECT crs, stanox, scheduled_time, actual_time, event_type, is_cancelled, cancel_reason, event_ts FROM trust_movements WHERE uid=? ${if (cancelledOnlyTrainId != null) "AND train_id=?" else ""} AND ${serviceDaySql("event_ts")} ORDER BY event_ts DESC",
+        "SELECT crs, stanox, scheduled_time, actual_time, event_type, is_cancelled, cancel_reason, event_ts FROM movements WHERE uid=? ${if (cancelledOnlyTrainId != null) "AND train_id=?" else ""} AND ${serviceDaySql("event_ts")} ORDER BY event_ts DESC",
         listOfNotNull(uid, cancelledOnlyTrainId) + serviceDayArgs(svcDate)
     ) { rs ->
         while (rs.next()) {

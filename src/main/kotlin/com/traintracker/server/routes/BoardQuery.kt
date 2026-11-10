@@ -334,13 +334,13 @@ private fun JdbcTransaction.boardServices(
             // When a train ID has only cancellations, use that train ID's events alone.
             val cancelledOnlyTrainId = mutableMapOf<String, String>()
             query(
-                "SELECT uid, train_id FROM trust_movements WHERE uid IN (${placeholders(uids.size)}) AND ${serviceDaySql("event_ts")} GROUP BY uid, train_id HAVING $CANCELLED_ONLY_SQL",
+                "SELECT uid, train_id FROM movements WHERE uid IN (${placeholders(uids.size)}) AND ${serviceDaySql("event_ts")} GROUP BY uid, train_id HAVING $CANCELLED_ONLY_SQL",
                 args
             ) { rs ->
                 while (rs.next()) cancelledOnlyTrainId[rs.getString("uid") ?: continue] = rs.getString("train_id") ?: continue
             }
             query(
-                "SELECT uid, train_id, scheduled_time, actual_time, is_cancelled, cancel_reason, event_type FROM trust_movements WHERE uid IN (${placeholders(uids.size)}) AND ${serviceDaySql("event_ts")} ORDER BY event_ts DESC",
+                "SELECT uid, train_id, scheduled_time, actual_time, is_cancelled, cancel_reason, event_type FROM movements WHERE uid IN (${placeholders(uids.size)}) AND ${serviceDaySql("event_ts")} ORDER BY event_ts DESC",
                 args
             ) { rs ->
                 while (rs.next()) {

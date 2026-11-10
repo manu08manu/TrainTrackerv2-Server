@@ -92,7 +92,7 @@ object AppDatabase {
 
     /** Hourly clean-up. The first group shares one failure path (an error stops the rest); the second does not. */
     fun pruneExpired() {
-        transaction { TrustMovements.deleteWhere { TrustMovements.eventTs less LocalDateTime.now().minusDays(31L) } }
+        transaction { Movements.deleteWhere { Movements.eventTs less LocalDateTime.now().minusDays(31L) } }
         transaction { TrainLocations.deleteWhere { TrainLocations.updatedAt less LocalDateTime.now().minusHours(24L) } }
         transaction { AllocationConsists.deleteWhere { AllocationConsists.updatedAt less LocalDateTime.now(ZoneOffset.UTC).minusDays(30L) } }
         transaction { AllocationLegs.deleteWhere { AllocationLegs.updatedAt less LocalDateTime.now().minusDays(30L) } }
@@ -106,7 +106,7 @@ object AppDatabase {
             "DELETE FROM schedules WHERE stp_indicator = 'N' AND schedule_end_date < date('now', '-30 days')",
             "DELETE FROM cif_change_alerts WHERE dismissed_at IS NOT NULL AND dismissed_at < datetime('now', '-7 days')",
             "DELETE FROM feedback WHERE dismissed_at IS NOT NULL AND dismissed_at < datetime('now', '-30 days')",
-            // linx_movements / linx_activations duplicate trust_movements / train_activations; they are only
+            // linx_movements / linx_activations duplicate movements / train_activations; they are only
             // needed for the TD platform fill (15 minutes) and debugging.
             "DELETE FROM linx_movements WHERE received_ms < (strftime('%s','now') - 2*86400) * 1000",
             "DELETE FROM linx_activations WHERE received_ms < (strftime('%s','now') - 2*86400) * 1000",
@@ -126,19 +126,19 @@ object AppDatabase {
     fun batchUpsertMovements(movements: List<MovementBatch>) {
         if (movements.isEmpty()) return
         transaction {
-            TrustMovements.batchReplace(movements) { m ->
-                this[TrustMovements.headcode] = m.headcode
-                this[TrustMovements.trainId] = m.trainId
-                this[TrustMovements.uid] = m.uid
-                this[TrustMovements.stanox] = m.stanox
-                this[TrustMovements.crs] = m.crs
-                this[TrustMovements.eventType] = m.eventType
-                this[TrustMovements.scheduledTime] = m.scheduledTime
-                this[TrustMovements.actualTime] = m.actualTime
-                this[TrustMovements.platform] = m.platform
-                this[TrustMovements.isCancelled] = m.isCancelled
-                this[TrustMovements.cancelReason] = m.cancelReason
-                this[TrustMovements.eventTs] = LocalDateTime.now()
+            Movements.batchReplace(movements) { m ->
+                this[Movements.headcode] = m.headcode
+                this[Movements.trainId] = m.trainId
+                this[Movements.uid] = m.uid
+                this[Movements.stanox] = m.stanox
+                this[Movements.crs] = m.crs
+                this[Movements.eventType] = m.eventType
+                this[Movements.scheduledTime] = m.scheduledTime
+                this[Movements.actualTime] = m.actualTime
+                this[Movements.platform] = m.platform
+                this[Movements.isCancelled] = m.isCancelled
+                this[Movements.cancelReason] = m.cancelReason
+                this[Movements.eventTs] = LocalDateTime.now()
             }
         }
     }
@@ -236,7 +236,7 @@ object AppDatabase {
             transaction {
                 val result = mutableMapOf<Pair<String, String>, String>()
                 query(
-                    "SELECT uid, crs, stanox, platform FROM trust_movements WHERE uid IN (${placeholders(uids.size)}) AND platform IS NOT NULL AND platform != '' AND event_ts >= datetime('now', '-12 hours') ORDER BY event_ts ASC",
+                    "SELECT uid, crs, stanox, platform FROM movements WHERE uid IN (${placeholders(uids.size)}) AND platform IS NOT NULL AND platform != '' AND event_ts >= datetime('now', '-12 hours') ORDER BY event_ts ASC",
                     uids.toList()
                 ) { rs ->
                     while (rs.next()) {
@@ -482,9 +482,9 @@ object AppDatabase {
                 trainLocationsCount = trainLocCount,
                 scheduleCount = count("SELECT COUNT(*) FROM schedules"),
                 uniqueServiceCount = count("SELECT COUNT(DISTINCT uid) FROM schedules"),
-                trustMovementCount = count("SELECT COUNT(*) FROM trust_movements"),
-                trustMovementCount24h = TrustMovements.selectAll()
-                    .where { TrustMovements.eventTs greaterEq LocalDateTime.now().minusHours(24L) }.count().toInt(),
+                trustMovementCount = count("SELECT COUNT(*) FROM movements"),
+                trustMovementCount24h = Movements.selectAll()
+                    .where { Movements.eventTs greaterEq LocalDateTime.now().minusHours(24L) }.count().toInt(),
                 allocationsToday = count("SELECT COUNT(DISTINCT headcode) FROM allocation_history WHERE service_date=?", listOf(today)),
                 hspUnitCount = AllocationConsists.selectAll().count().toInt(),
                 tiplocNameCount = CorpusLookup.tiplocNameCount(),

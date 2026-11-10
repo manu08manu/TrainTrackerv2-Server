@@ -7,6 +7,13 @@ import com.traintracker.server.database.MovementBatch
 import com.traintracker.server.database.execUpdate
 import com.traintracker.server.database.query
 import java.io.StringReader
+import java.time.LocalDate
+import java.time.LocalDateTime
+import java.time.LocalTime
+import java.time.OffsetDateTime
+import java.time.ZoneId
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicLong
@@ -23,7 +30,7 @@ private val log = LoggerFactory.getLogger("LinxConsumer")
 /**
  * Network Rail LINX EI (TAF/TSI XML), the successor to the TRUST movements feed and the source of all train
  * running data. Each poll is stored in the linx_* tables (kept briefly, for the TD platform fill and for
- * debugging) and handed to [LinxMovementWriter], which writes trust_movements / train_activations.
+ * debugging) and handed to [LinxMovementWriter], which writes movements / train_activations.
  *
  * Flows (Kafka header "linx.flow"):
  *  - S509 Train Activation (PathDetailsMessage): uid, origin and its departure time.
@@ -34,6 +41,10 @@ private val log = LoggerFactory.getLogger("LinxConsumer")
  *  - S515 Change of Identity: modification code 07; OperationalTrainNumber is the new headcode and
  *    ReferenceOTN the old one. The train ID does not change.
  * Unknown flows and parse failures are sampled into linx_raw.
+ *
+ * Times are labelled "-00:00". Whether that is true UTC, or UK clock time labelled as UTC (as TRUST's were),
+ * only shows in British Summer Time, so it is detected rather than assumed: see [voteClock]. All times are
+ * stored as UK clock time, like the timetable.
  *
  * Identifiers: the "TR" core is the TRUST train ID with a "--" prefix; the "PA" core is headcode + uid + 2
  * digits. LocationPrimaryCode is not a STANOX, so locations are keyed by TIPLOC and mapped to STANOX here.
@@ -47,6 +58,16 @@ object LinxConsumer {
     private var lastReport = System.currentTimeMillis()
     private var lastPlatformFill = 0L
     private var rawThisMinute = 0
+
+    private val LONDON: ZoneId = ZoneId.of("Europe/London")
+    private val HHMM: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
+    private const val CLOCK_VOTES_NEEDED = 20
+
+    /** True when LINX's "-00:00" times are really UK clock time; decided by [voteClock] / [decideClock]. */
+    @Volatile private var labelsUkTime = false
+    private var clockDecided = false
+    private var votesUkTime = 0
+    private var votesUtc = 0
 
     /** TIPLOC -> STANOX from the RDM location files, refreshed hourly. */
     @Volatile private var tiplocStanox: Map<String, String> = emptyMap()
@@ -151,6 +172,7 @@ object LinxConsumer {
         count("flow:$flow")
         try {
             val root = dbf.newDocumentBuilder().parse(InputSource(StringReader(xml))).documentElement
+            voteClock(root, tsMs)
             when (flow) {
                 "S510" -> running(root, tsMs)
                 "S509" -> activation(root, tsMs)
@@ -161,6 +183,34 @@ object LinxConsumer {
             count("error")
             raw(flow, "parse error: ${e.message?.take(200)}", xml, tsMs)
         }
+    }
+
+    /**
+     * Kafka's timestamp is true UTC and lands within ~1.5 seconds of LINX's MessageDateTime. If the labelled
+     * time is about an hour ahead of it, LINX is sending UK summer time labelled as UTC; if they agree, the
+     * labels are true UTC. (In GMT both agree, and either reading gives the same clock time.)
+     */
+    private fun voteClock(root: Element, kafkaMs: Long) {
+        val sent = root.text("MessageDateTime") ?: return
+        val labelledS = try { OffsetDateTime.parse(sent).toEpochSecond() } catch (e: Exception) { return }
+        val gap = labelledS - kafkaMs / 1000
+        when {
+            gap in 1800..5400 -> votesUkTime++
+            kotlin.math.abs(gap) < 1800 -> votesUtc++
+        }
+    }
+
+    /** Settles [labelsUkTime] once enough messages have voted; runs before a poll's times are converted. */
+    private fun decideClock() {
+        if (votesUkTime + votesUtc < CLOCK_VOTES_NEEDED) return
+        val ukTime = votesUkTime > votesUtc
+        if (!clockDecided || ukTime != labelsUkTime) {
+            log.info("LINX times are ${if (ukTime) "UK clock time labelled as UTC" else "true UTC"} ($votesUkTime vs $votesUtc messages)")
+        }
+        labelsUkTime = ukTime
+        clockDecided = true
+        votesUkTime = 0
+        votesUtc = 0
     }
 
     private fun raw(flow: String, note: String, xml: String, tsMs: Long) {
@@ -235,6 +285,7 @@ object LinxConsumer {
     }
 
     private fun flush() {
+        decideClock()
         val batch = ArrayList<Pending>()
         while (true) batch.add(pending.poll() ?: break)
         if (batch.isNotEmpty()) {
@@ -245,7 +296,7 @@ object LinxConsumer {
                             "INSERT OR REPLACE INTO linx_movements (train_id, uid, headcode, start_date, tiploc, stanox, crs, loc_status, event_type, booked_ts, actual_ts, booked_time, actual_time, delay, reference_otn, received_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                             listOf(
                                 p.trainId, p.uid, p.headcode, p.startDate, p.tiploc, p.stanox, p.crs, p.locStatus, p.eventType,
-                                p.bookedTs, p.actualTs, hhmm(p.bookedTs), hhmm(p.actualTs), p.delay?.toString(), p.referenceOtn, p.receivedMs.toString(),
+                                p.bookedTs, p.actualTs, ukTime(p.bookedTs), ukTime(p.actualTs), p.delay?.toString(), p.referenceOtn, p.receivedMs.toString(),
                             )
                         )
                         is Activation -> execUpdate(
@@ -332,20 +383,20 @@ object LinxConsumer {
         }
     }
 
-    /** Also writes TRUST-shaped rows (trust_movements, train_activations) so every reader uses LINX data. */
+    /** Also writes TRUST-shaped rows (movements, train_activations) so every reader uses LINX data. */
     private fun writeMovements(batch: List<Pending>) {
         try {
             val rows = ArrayList<MovementBatch>()
             for (p in batch) when (p) {
                 is Movement -> LinxMovementWriter.movement(
-                    p.trainId, p.uid, p.headcode, p.stanox, p.crs, p.eventType, hhmm(p.bookedTs), hhmm(p.actualTs), p.delay
+                    p.trainId, p.uid, p.headcode, p.stanox, p.crs, p.eventType, ukTime(p.bookedTs), ukTime(p.actualTs), p.delay
                 )?.let(rows::add)
                 is Activation -> LinxMovementWriter.activation(p.trainId, p.uid, p.originStanox)
                 is Modification -> when (p.kind) {
                     "CANCELLATION", "CANCELLATION_EN_ROUTE" ->
-                        LinxMovementWriter.cancellation(p.trainId, p.uid, p.headcode, p.stanox, p.time?.take(5) ?: "", p.reason)
+                        LinxMovementWriter.cancellation(p.trainId, p.uid, p.headcode, p.stanox, ukClock(p.time, p.startDate), p.reason)
                     "CHANGE_OF_IDENTITY" -> p.previousHeadcode?.let { LinxMovementWriter.changeOfIdentity(p.trainId, p.uid, it, p.headcode) }
-                    "REINSTATEMENT" -> LinxMovementWriter.reinstatement(p.trainId, p.uid, p.headcode, p.stanox, p.time?.take(5) ?: "")
+                    "REINSTATEMENT" -> LinxMovementWriter.reinstatement(p.trainId, p.uid, p.headcode, p.stanox, ukClock(p.time, p.startDate))
                     "CHANGE_OF_ORIGIN" -> LinxMovementWriter.changeOfOrigin(
                         p.trainId, p.uid, p.headcode, p.startDate, p.tiploc, p.stanox, p.reason, ::stanoxFor
                     )
@@ -359,13 +410,35 @@ object LinxConsumer {
         }
     }
 
-    /** ISO date-time with offset -> epoch seconds; null when unparseable. */
+    /** LINX date-time ("2026-11-10T13:31:00-00:00") -> epoch seconds; null when unparseable. */
     private fun epochSeconds(ts: String?): Long? = try {
-        ts?.let { java.time.OffsetDateTime.parse(it).toEpochSecond() }
+        ts?.let {
+            if (labelsUkTime) LocalDateTime.parse(it.substring(0, 19)).atZone(LONDON).toEpochSecond()
+            else OffsetDateTime.parse(it).toEpochSecond()
+        }
     } catch (e: Exception) {
         null
     }
 
-    /** "2026-11-10T13:31:00-00:00" -> "13:31"; "" when missing. */
-    private fun hhmm(ts: String): String = if (ts.length >= 16) ts.substring(11, 16) else ""
+    /** LINX date-time -> UK clock time "HH:mm"; "" when missing. */
+    private fun ukTime(ts: String): String {
+        if (ts.length < 16) return ""
+        if (labelsUkTime) return ts.substring(11, 16)
+        return try {
+            OffsetDateTime.parse(ts).atZoneSameInstant(LONDON).format(HHMM)
+        } catch (e: Exception) {
+            ts.substring(11, 16)
+        }
+    }
+
+    /** A LINX time with no date or offset ("14:17:00", on [date]) -> UK clock time "HH:mm"; "" when missing. */
+    private fun ukClock(time: String?, date: String): String {
+        val t = time?.takeIf { it.length >= 5 } ?: return ""
+        if (labelsUkTime) return t.take(5)
+        return try {
+            LocalDateTime.of(LocalDate.parse(date), LocalTime.parse(t)).atOffset(ZoneOffset.UTC).atZoneSameInstant(LONDON).format(HHMM)
+        } catch (e: Exception) {
+            t.take(5)
+        }
+    }
 }

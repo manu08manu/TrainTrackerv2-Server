@@ -8,7 +8,7 @@ import com.traintracker.server.cif.insertStops
 import com.traintracker.server.database.AppDatabase
 import com.traintracker.server.database.MovementBatch
 import com.traintracker.server.database.Schedules
-import com.traintracker.server.database.TrustMovements
+import com.traintracker.server.database.Movements
 import com.traintracker.server.database.effectiveDateFor
 import com.traintracker.server.database.scheduleDateScope
 import java.time.Duration

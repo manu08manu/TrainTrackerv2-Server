@@ -183,7 +183,7 @@ private fun searchResults(bestRows: List<ResultRow>, date: String): List<Service
     if (uids.isNotEmpty()) {
         try {
             query(
-                "SELECT uid, scheduled_time, actual_time, is_cancelled, cancel_reason, event_type FROM trust_movements WHERE uid IN (${placeholders(uids.size)}) AND ${serviceDaySql("event_ts")} ORDER BY event_ts DESC",
+                "SELECT uid, scheduled_time, actual_time, is_cancelled, cancel_reason, event_type FROM movements WHERE uid IN (${placeholders(uids.size)}) AND ${serviceDaySql("event_ts")} ORDER BY event_ts DESC",
                 uids.toList() + serviceDayArgs(date)
             ) { rs ->
                 while (rs.next()) {
