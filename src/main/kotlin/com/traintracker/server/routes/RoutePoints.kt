@@ -1,5 +1,7 @@
 package com.traintracker.server.routes
 
+import com.traintracker.server.database.placeholders
+import com.traintracker.server.database.query
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 import org.slf4j.LoggerFactory
 import java.time.Instant
@@ -11,6 +13,11 @@ import java.util.concurrent.ConcurrentHashMap
 
 private val rpLog = LoggerFactory.getLogger("RoutePoints")
 
+/**
+ * Adds timing points the timetable does not list but TD sees this train pass ("PT" calls, isTdPoint): learned
+ * from the last 35 days of td_events for the headcode, on days the uid ran, and placed between the calls the
+ * train passes them between. On a day the train ran, each point shows the time TD saw it.
+ */
 object RoutePoints {
     private val LONDON: ZoneId = ZoneId.of("Europe/London")
     private val HM: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
@@ -31,8 +38,8 @@ object RoutePoints {
 
     private fun clean(s: String): String = s.filter { it.isLetterOrDigit() }
 
-    private fun inList(values: Collection<String>): String =
-        values.map { clean(it) }.filter { it.isNotEmpty() }.distinct().joinToString(",") { "'$it'" }
+    /** Cleaned, distinct, non-empty values for an IN (...) list. */
+    private fun cleanList(values: Collection<String>): List<String> = values.map { clean(it) }.filter { it.isNotEmpty() }.distinct()
 
     private fun parseMin(t: String?): Int? {
         if (t == null || t.length < 5 || t[2] != ':') return null
@@ -65,8 +72,12 @@ object RoutePoints {
             }
             val stanoxByTiploc = HashMap<String, String>()
             transaction {
-                val il = inList(cps.map { it.tiploc })
-                exec("SELECT tiploc, stanox, 0 AS p FROM location_overrides WHERE tiploc IN ($il) AND stanox IS NOT NULL AND stanox != '' UNION ALL SELECT tiploc, stanox, 2 FROM pif_loc WHERE tiploc IN ($il) AND stanox IS NOT NULL AND stanox != '' UNION ALL SELECT tiploc, stanox, 1 FROM nlc_loc WHERE tiploc IN ($il) AND stanox IS NOT NULL AND stanox != '' ORDER BY p") { rs ->
+                val tiplocs = cleanList(cps.map { it.tiploc })
+                val il = placeholders(tiplocs.size)
+                query(
+                    "SELECT tiploc, stanox, 0 AS p FROM location_overrides WHERE tiploc IN ($il) AND stanox IS NOT NULL AND stanox != '' UNION ALL SELECT tiploc, stanox, 2 FROM pif_loc WHERE tiploc IN ($il) AND stanox IS NOT NULL AND stanox != '' UNION ALL SELECT tiploc, stanox, 1 FROM nlc_loc WHERE tiploc IN ($il) AND stanox IS NOT NULL AND stanox != '' ORDER BY p",
+                    tiplocs + tiplocs + tiplocs
+                ) { rs ->
                     while (rs.next()) {
                         val tl = rs.getString(1)
                         val sx = rs.getString(2)
@@ -90,8 +101,12 @@ object RoutePoints {
             val stanoxes = learned.map { it.stanox }
             val info = HashMap<String, Info>()
             transaction {
-                val ils = inList(stanoxes)
-                exec("SELECT stanox, tiploc, name FROM (SELECT stanox, tiploc, name, 0 AS p FROM location_overrides WHERE stanox IN ($ils) UNION ALL SELECT stanox, tiploc, name, 1 FROM pif_loc WHERE stanox IN ($ils) UNION ALL SELECT stanox, tiploc, description, 2 FROM nlc_loc WHERE stanox IN ($ils)) ORDER BY p, LENGTH(name), tiploc") { rs ->
+                val sx = cleanList(stanoxes)
+                val ils = placeholders(sx.size)
+                query(
+                    "SELECT stanox, tiploc, name FROM (SELECT stanox, tiploc, name, 0 AS p FROM location_overrides WHERE stanox IN ($ils) UNION ALL SELECT stanox, tiploc, name, 1 FROM pif_loc WHERE stanox IN ($ils) UNION ALL SELECT stanox, tiploc, description, 2 FROM nlc_loc WHERE stanox IN ($ils)) ORDER BY p, LENGTH(name), tiploc",
+                    sx + sx + sx
+                ) { rs ->
                     while (rs.next()) {
                         val sx = rs.getString(1)
                         val tl = rs.getString(2)
@@ -111,7 +126,11 @@ object RoutePoints {
             val ranOnDate = activationDays(hc, setOf(reqDate))[reqDate]?.contains(uid) == true
             if (ranOnDate) {
                 transaction {
-                    exec("SELECT stanox, MIN(event_s) FROM td_events WHERE headcode='$hc' AND event_s >= $lo AND event_s <= $hi AND stanox IN (${inList(stanoxes)}) GROUP BY stanox") { rs ->
+                    val sx = cleanList(stanoxes)
+                    query(
+                        "SELECT stanox, MIN(event_s) FROM td_events WHERE headcode=? AND event_s >= $lo AND event_s <= $hi AND stanox IN (${placeholders(sx.size)}) GROUP BY stanox",
+                        listOf(hc) + sx
+                    ) { rs ->
                         while (rs.next()) {
                             val sx = rs.getString(1)
                             if (sx != null) observed[sx] = rs.getLong(2)
@@ -160,7 +179,7 @@ object RoutePoints {
         val out = HashMap<LocalDate, MutableSet<String>>()
         if (dates.isEmpty()) return out
         transaction {
-            exec("SELECT train_id, uid, updated_at FROM train_activations WHERE substr(train_id,3,4)='$hc'") { rs ->
+            query("SELECT train_id, uid, updated_at FROM train_activations WHERE substr(train_id,3,4)=?", listOf(hc)) { rs ->
                 while (rs.next()) {
                     val tid = rs.getString(1) ?: continue
                     val u = rs.getString(2) ?: continue
@@ -192,7 +211,10 @@ object RoutePoints {
     private fun stanoxesOfUid(u: String): Set<String> {
         val r = HashSet<String>()
         transaction {
-            exec("SELECT DISTINCT lo.stanox FROM schedules s JOIN (SELECT tiploc, stanox FROM location_overrides UNION ALL SELECT tiploc, stanox FROM pif_loc WHERE tiploc NOT IN (SELECT tiploc FROM location_overrides WHERE stanox IS NOT NULL AND stanox != '') UNION ALL SELECT tiploc, stanox FROM nlc_loc WHERE tiploc NOT IN (SELECT tiploc FROM location_overrides WHERE stanox IS NOT NULL AND stanox != '')) lo ON lo.tiploc = s.tiploc WHERE s.uid='${clean(u)}' AND lo.stanox IS NOT NULL AND lo.stanox != ''") { rs ->
+            query(
+                "SELECT DISTINCT lo.stanox FROM schedules s JOIN (SELECT tiploc, stanox FROM location_overrides UNION ALL SELECT tiploc, stanox FROM pif_loc WHERE tiploc NOT IN (SELECT tiploc FROM location_overrides WHERE stanox IS NOT NULL AND stanox != '') UNION ALL SELECT tiploc, stanox FROM nlc_loc WHERE tiploc NOT IN (SELECT tiploc FROM location_overrides WHERE stanox IS NOT NULL AND stanox != '')) lo ON lo.tiploc = s.tiploc WHERE s.uid=? AND lo.stanox IS NOT NULL AND lo.stanox != ''",
+                listOf(clean(u))
+            ) { rs ->
                 while (rs.next()) {
                     val x = rs.getString(1)
                     if (x != null) r.add(x)
@@ -208,7 +230,7 @@ object RoutePoints {
         val from = Instant.now().epochSecond - HISTORY_DAYS * 86400L
         val evs = ArrayList<Ev>()
         transaction {
-            exec("SELECT stanox, event_s FROM td_events WHERE headcode='$hc' AND event_s >= $from") { rs ->
+            query("SELECT stanox, event_s FROM td_events WHERE headcode=? AND event_s >= $from", listOf(hc)) { rs ->
                 while (rs.next()) {
                     val sx = rs.getString(1)
                     if (sx != null) evs.add(Ev(sx, rs.getLong(2)))

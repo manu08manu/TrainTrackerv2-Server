@@ -1,5 +1,6 @@
 package com.traintracker.server
 
+/** Network Rail delay attribution (TRUST reason) codes. */
 object ReasonCodes {
     private val cancelReasons: Map<String, String> = mapOf(
         "AA" to "Waiting acceptance into terminal or yard",
@@ -247,13 +248,9 @@ object ReasonCodes {
         "ZZ" to "Uninvestigated loss in running"
     )
 
-    fun resolveCancel(raw: String): String {
-        if (raw.isBlank()) return ""
-        return cancelReasons[raw.trim().uppercase()] ?: "Cancellation ($raw)"
-    }
-
+    /** Description of a TRUST delay/cancellation reason code; blank input is returned as it is. */
     fun resolve(raw: String?): String? {
         if (raw.isNullOrBlank()) return raw
-        return resolveCancel(raw)
+        return cancelReasons[raw.trim().uppercase()] ?: "Cancellation ($raw)"
     }
 }

@@ -1,13 +1,14 @@
 package com.traintracker.server.cif
 
-import com.traintracker.server.auth.AuthDatabase
 import com.traintracker.server.database.AppDatabase
+import com.traintracker.server.database.Overrides
 import java.util.concurrent.ConcurrentHashMap
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 import org.slf4j.LoggerFactory
 
 private val log = LoggerFactory.getLogger("CorpusLookup")
 
+/** Counts sightings of unknown items in memory and adds them to a "missing" table on flush(). */
 private class MissingItemTracker(private val table: String, private val keyColumn: String) {
     private val counts = ConcurrentHashMap<String, Int>()
     private val headcodes = ConcurrentHashMap<String, String>()
@@ -48,6 +49,10 @@ private class MissingItemTracker(private val table: String, private val keyColum
     }
 }
 
+/**
+ * In-memory location and operator lookups: TIPLOC/STANOX/CRS/name and TSC -> operator.
+ * Feed data comes from LocationData; manual overrides (Overrides) always win.
+ */
 object CorpusLookup {
     private val tiplocToCrs = HashMap<String, String>(10000)
     private val stanoxToCrs = HashMap<String, String>(10000)
@@ -62,46 +67,35 @@ object CorpusLookup {
     private var stanoxTiplocOverrides: Map<String, String> = emptyMap()
     private val tiplocToCifName = HashMap<String, String>(12000)
     private val noSmartTracker = MissingItemTracker("missing_smart_stanox", "stanox")
-    private var noSmartTableReady = false
     private val crsToName = HashMap<String, String>(3000)
     @Volatile
     private var crsMapBuilt = false
 
-    private fun normaliseCrs(crs: String?): String? {
-        if (crs.isNullOrEmpty()) return null
-        val resolved = crs
-        return if (resolved.length <= 3) resolved else null
-    }
+    /** A CRS longer than 3 characters is not a CRS. */
+    private fun normaliseCrs(crs: String?): String? = crs?.takeIf { it.isNotEmpty() && it.length <= 3 }
 
+    /** Loads the manual overrides at startup. */
     fun init() {
-        try {
-            val overrides = AuthDatabase.loadCrsOverrides()
-            for ((k, v) in overrides) tiplocToCrs[k] = v
-            log.info("CorpusLookup: loaded ${overrides.size} CRS overrides from DB")
-        } catch (e: Exception) {
-            log.warn("CorpusLookup: failed to load CRS overrides from DB: ${e.message}")
-        }
-        log.info("CorpusLookup: loaded ${tiplocToCrs.size} manual mappings")
-        try {
-            val overrides = AuthDatabase.loadNameOverrides()
-            for ((k, v) in overrides) tiplocToName[k] = v
-            log.info("CorpusLookup: loaded ${overrides.size} TIPLOC name overrides from DB")
-        } catch (e: Exception) {
-            log.warn("CorpusLookup: failed to load TIPLOC name overrides from DB: ${e.message}")
-        }
-        try {
-            val tscOverrides = AuthDatabase.loadOperatorOverrides()
-            for ((k, v) in tscOverrides) tscToOperator[k] = v
-            log.info("CorpusLookup: loaded ${tscOverrides.size} TSC operator overrides from DB")
-        } catch (e: Exception) {
-            log.warn("CorpusLookup: failed to load TSC operator overrides from DB: ${e.message}")
-        }
+        loadOverrides("CRS", tiplocToCrs, Overrides::tiplocCrs)
+        loadOverrides("TIPLOC name", tiplocToName, Overrides::tiplocNames)
+        loadOverrides("TSC operator", tscToOperator, Overrides::tscOperators)
         reloadStanoxOverrides()
     }
 
+    private fun loadOverrides(label: String, into: HashMap<String, String>, load: () -> Map<String, String>) {
+        try {
+            val overrides = load()
+            into.putAll(overrides)
+            log.info("CorpusLookup: loaded ${overrides.size} $label overrides from DB")
+        } catch (e: Exception) {
+            log.warn("CorpusLookup: failed to load $label overrides from DB: ${e.message}")
+        }
+    }
+
+    /** Applies feed TIPLOC -> CRS entries; overrides keep precedence. */
     fun mergeFromFeed(feedEntries: Map<String, String>) {
         val dbOverrides = try {
-            AuthDatabase.loadCrsOverrides()
+            Overrides.tiplocCrs()
         } catch (e: Exception) {
             log.warn("CorpusLookup: failed to reload CRS overrides before merge: ${e.message}")
             emptyMap()
@@ -127,8 +121,8 @@ object CorpusLookup {
 
     fun reloadStanoxOverrides() {
         try {
-            stanoxCrsOverrides = AuthDatabase.loadStanoxCrsOverrides()
-            stanoxTiplocOverrides = AuthDatabase.loadStanoxTiplocOverrides()
+            stanoxCrsOverrides = Overrides.stanoxCrs()
+            stanoxTiplocOverrides = Overrides.stanoxTiplocs()
             log.info("CorpusLookup: loaded ${stanoxCrsOverrides.size} STANOX->CRS and ${stanoxTiplocOverrides.size} STANOX->TIPLOC overrides from DB")
         } catch (e: Exception) {
             log.warn("CorpusLookup: failed to load STANOX overrides from DB: ${e.message}")
@@ -145,17 +139,10 @@ object CorpusLookup {
         tiplocToCrs.entries.filter { it.value.equals(crs, ignoreCase = true) }
             .map { it.key }.sorted()
 
-    private fun recordMissing(tracker: MissingItemTracker, item: String, headcode: String = "", uid: String = "") {
-        tracker.record(item, headcode, uid)
-    }
-
-    private fun recordMissingTiploc(tiploc: String, headcode: String = "", uid: String = "") {
-        recordMissing(missingTiplocTracker, tiploc, headcode, uid)
-    }
-
+    /** Records each TIPLOC that has no name override. */
     fun recordMissingFromNames(tiplocs: Set<String>, headcode: String = "", uid: String = "") {
         for (tiploc in tiplocs) {
-            if (tiplocToName[tiploc] == null) recordMissingTiploc(tiploc, headcode, uid)
+            if (tiplocToName[tiploc] == null) missingTiplocTracker.record(tiploc, headcode, uid)
         }
     }
 
@@ -166,12 +153,8 @@ object CorpusLookup {
     fun tscsForOperator(operator: String): List<String> =
         tscToOperator.filterValues { it.equals(operator, ignoreCase = true) }.keys.toList()
 
-    fun recordMissingTsc(tsc: String, headcode: String = "", uid: String = "") {
-        recordMissing(missingTscTracker, tsc, headcode, uid)
-    }
-
     fun recordMissingTscIfNoOverride(tsc: String, headcode: String = "", uid: String = "") {
-        if (tsc.isNotEmpty() && tscToOperator[tsc] == null) recordMissingTsc(tsc, headcode, uid)
+        if (tsc.isNotEmpty() && tscToOperator[tsc] == null) missingTscTracker.record(tsc, headcode, uid)
     }
 
     fun mergeCifNamesFromFeed(entries: Map<String, String>) {
@@ -181,50 +164,33 @@ object CorpusLookup {
 
     fun nameFromTiploc(tiploc: String): String? = tiplocToName[tiploc] ?: tiplocToCifName[tiploc]
 
-    fun namesFromTiplocs(tiplocs: Set<String>): Map<String, String?> {
-        if (tiplocs.isEmpty()) return emptyMap()
-        val result = HashMap<String, String?>(tiplocs.size)
-        for (t in tiplocs) result[t] = tiplocToName[t] ?: tiplocToCifName[t]
-        return result
-    }
+    fun namesFromTiplocs(tiplocs: Set<String>): Map<String, String?> = tiplocs.associateWith { nameFromTiploc(it) }
 
+    /** Records the TIPLOC of a TRUST movement when it has no name override. */
     fun checkTrustMovementForMissingName(stanox: String, headcode: String = "") {
-        // RECONSTRUCTED: the decompiler merged tiploc and uid into one variable; live bytecode
-        // (locals tiploc/uid, `?: run { return }`).
-        val tiploc = tiplocFromStanox(stanox) ?: run { return }
+        val tiploc = tiplocFromStanox(stanox) ?: return
         if (tiplocToName[tiploc] == null) {
-            val uid = if (headcode.isNotEmpty()) AppDatabase.uidForHeadcode(headcode) ?: "" else ""
-            recordMissingTiploc(tiploc, headcode, uid)
+            val uid = if (headcode.isNotEmpty()) AppDatabase.scheduleForHeadcode(headcode)?.second ?: "" else ""
+            missingTiplocTracker.record(tiploc, headcode, uid)
         }
     }
 
+    /** Records the TSC of today's schedule for a headcode when it has no operator. */
     fun checkTrustMovementForMissingAtoc(headcode: String) {
         if (headcode.isEmpty()) return
-        val (tsc, uid) = AppDatabase.tscAndUidForHeadcode(headcode) ?: return
+        val (tsc, uid) = AppDatabase.scheduleForHeadcode(headcode) ?: return
         recordMissingTscIfNoOverride(tsc, headcode, uid)
     }
 
-    fun flushMissingTiplocs() {
-        missingTiplocTracker.flush()
-    }
+    fun flushMissingTiplocs() = missingTiplocTracker.flush()
 
-    fun flushMissingTscs() {
-        missingTscTracker.flush()
-    }
+    fun flushMissingTscs() = missingTscTracker.flush()
 
     fun recordNoSmartCoverage(stanox: String, type: String, headcode: String = "") {
         noSmartTracker.record("$stanox|${if (type == "ARRIVAL") "ARR" else "DEP"}", headcode)
     }
 
-    fun flushNoSmartCoverage() {
-        if (!noSmartTableReady) {
-            transaction {
-                exec("CREATE TABLE IF NOT EXISTS missing_smart_stanox (stanox TEXT PRIMARY KEY, first_seen TEXT DEFAULT (datetime('now')), last_seen TEXT DEFAULT (datetime('now')), seen_count INTEGER DEFAULT 1, headcode TEXT DEFAULT '', uid TEXT DEFAULT '')")
-            }
-            noSmartTableReady = true
-        }
-        noSmartTracker.flush()
-    }
+    fun flushNoSmartCoverage() = noSmartTracker.flush()
 
     fun tiplocNameCount(): Int = tiplocToName.size
 
@@ -276,44 +242,41 @@ object CorpusLookup {
 
     fun updateTiplocCrs(tiploc: String, crs: String, changedBy: String) {
         try {
-            AuthDatabase.setCrsOverride(tiploc, crs, changedBy)
+            Overrides.setCrs(tiploc, crs, changedBy)
             tiplocToCrs[tiploc] = crs
         } catch (e: Exception) {
             log.warn("CorpusLookup: failed to persist CRS override to DB: ${e.message}")
             throw e
         }
         try {
-            AuthDatabase.updateSchedulesCrs(tiploc, crs)
+            Overrides.applyCrsToSchedules(tiploc, crs)
             log.info("CorpusLookup: updated schedules CRS for $tiploc -> $crs")
         } catch (e: Exception) {
             log.warn("CorpusLookup: failed to update schedules CRS for $tiploc: ${e.message}")
         }
     }
 
+    fun updateTiplocName(tiploc: String, name: String, changedBy: String) =
+        updateOverride(tiplocToName, missingTiplocTracker, tiploc, name, "TIPLOC name") { Overrides.setName(tiploc, name, changedBy) }
+
+    fun updateTscOperator(tsc: String, operator: String) =
+        updateOverride(tscToOperator, missingTscTracker, tsc, operator, "TSC operator") { Overrides.setOperator(tsc, operator) }
+
     private fun updateOverride(
         map: HashMap<String, String>,
         tracker: MissingItemTracker,
         key: String,
         value: String,
-        changedBy: String,
-        entityLabel: String,
-        persist: (String, String, String) -> Unit
+        label: String,
+        persist: () -> Unit
     ) {
         try {
-            persist(key, value, changedBy)
+            persist()
             map[key] = value
             tracker.remove(key)
         } catch (e: Exception) {
-            log.warn("CorpusLookup: failed to persist $entityLabel override to DB: ${e.message}")
+            log.warn("CorpusLookup: failed to persist $label override to DB: ${e.message}")
             throw e
         }
-    }
-
-    fun updateTiplocName(tiploc: String, name: String, changedBy: String) {
-        updateOverride(tiplocToName, missingTiplocTracker, tiploc, name, changedBy, "TIPLOC name", AuthDatabase::setNameOverride)
-    }
-
-    fun updateTscOperator(tsc: String, operator: String, changedBy: String) {
-        updateOverride(tscToOperator, missingTscTracker, tsc, operator, changedBy, "TSC operator", AuthDatabase::setOperatorOverride)
     }
 }

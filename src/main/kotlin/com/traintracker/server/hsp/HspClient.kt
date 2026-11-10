@@ -1,5 +1,6 @@
 package com.traintracker.server.hsp
 
+import com.traintracker.server.Config
 import com.traintracker.server.cif.CorpusLookup
 import com.traintracker.server.database.AppDatabase
 import java.net.HttpURLConnection
@@ -58,11 +59,6 @@ data class HspMetricsResponse(
 )
 
 @Serializable
-data class HspDetailsRequest(
-    val rid: String
-)
-
-@Serializable
 data class HspLocation(
     val tiploc: String,
     val scheduledDep: String,
@@ -80,10 +76,11 @@ data class HspDetailsResponse(
     val locations: List<HspLocation>
 )
 
+/** Historical Service Performance API, cached in memory and in hsp_cache. */
 object HspClient {
     private val httpSemaphore = Semaphore(2)
     private const val BASE_URL = "https://api1.raildata.org.uk/1010-historical-service-performance-_hsp_v1/api/v1"
-    private val apiKey: String? by lazy { System.getenv("HSP_API_KEY")?.takeIf { it.isNotBlank() } }
+    private val apiKey: String? = Config.hspApiKey.takeIf { it.isNotBlank() }
     val isAvailable: Boolean
         get() = apiKey != null
     private val metricsCache = ConcurrentHashMap<String, HspMetricsResponse>()
