@@ -9,6 +9,7 @@ import com.traintracker.server.kafka.AllocationConsumer
 import com.traintracker.server.kafka.DarwinConsumer
 import com.traintracker.server.kafka.LinxConsumer
 import com.traintracker.server.kafka.TdConsumer
+import com.traintracker.server.routes.Punctuality
 import com.traintracker.server.kafka.VstpConsumer
 import com.traintracker.server.kafka.darwinPlatforms
 import com.traintracker.server.kafka.ridToUid
@@ -122,6 +123,7 @@ private suspend fun startBackgroundWork(scope: CoroutineScope) {
     SmartLookup.start(scope)
     TdConsumer.start(scope)
     log.info("Kafka consumers started")
+    Punctuality.start(scope)
 
     scope.launch {
         while (isActive) {

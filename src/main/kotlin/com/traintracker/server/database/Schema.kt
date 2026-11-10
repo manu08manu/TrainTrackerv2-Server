@@ -57,6 +57,11 @@ object Schema {
         "CREATE TABLE IF NOT EXISTS linx_modifications (id INTEGER PRIMARY KEY AUTOINCREMENT, train_id TEXT NOT NULL, uid TEXT NOT NULL DEFAULT '', headcode TEXT NOT NULL DEFAULT '', start_date TEXT NOT NULL DEFAULT '', code TEXT NOT NULL, kind TEXT NOT NULL, tiploc TEXT, stanox TEXT, time TEXT, reason TEXT, modified_at TEXT, received_ms INTEGER NOT NULL, previous_headcode TEXT)",
         "CREATE INDEX IF NOT EXISTS idx_linx_mod_train ON linx_modifications(train_id)",
         "CREATE INDEX IF NOT EXISTS idx_linx_mod_received ON linx_modifications(received_ms)",
+        // Punctuality: calls per station, operator and half-hour of each finished day (routes/Punctuality.kt)
+        "CREATE TABLE IF NOT EXISTS punctuality_daily (date TEXT NOT NULL, crs TEXT NOT NULL, toc TEXT NOT NULL, slot INTEGER NOT NULL, total INTEGER NOT NULL, early INTEGER NOT NULL, on_time INTEGER NOT NULL, late_minor INTEGER NOT NULL, late_moderate INTEGER NOT NULL, late_severe INTEGER NOT NULL, cancelled INTEGER NOT NULL, no_report INTEGER NOT NULL, delay_sum INTEGER NOT NULL, PRIMARY KEY (crs, date, toc, slot)) WITHOUT ROWID",
+        "CREATE INDEX IF NOT EXISTS idx_punctuality_toc ON punctuality_daily(toc, date)",
+        "CREATE INDEX IF NOT EXISTS idx_punctuality_date ON punctuality_daily(date)",
+        "CREATE TABLE IF NOT EXISTS punctuality_days (date TEXT PRIMARY KEY, built_at TEXT NOT NULL, calls INTEGER NOT NULL)",
         "CREATE TABLE IF NOT EXISTS linx_raw (id INTEGER PRIMARY KEY AUTOINCREMENT, flow TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', xml TEXT NOT NULL, received_ms INTEGER NOT NULL)",
     )
 
