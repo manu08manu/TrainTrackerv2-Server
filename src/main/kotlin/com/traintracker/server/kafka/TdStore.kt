@@ -1,6 +1,7 @@
 package com.traintracker.server.kafka
 
-import com.traintracker.server.database.Retention
+import java.time.Instant
+import java.time.temporal.ChronoUnit
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
@@ -8,18 +9,21 @@ import org.slf4j.LoggerFactory
 
 private val log = LoggerFactory.getLogger("TdStore")
 
+/** Buffers TD-derived STANOX events and writes them to td_events in bulk; keeps 31 days. */
 object TdStore {
     private const val CHUNK = 400
     private const val MAX_BATCH = 4000
-    private const val MAX_QUEUE = 100000
+    private const val MAX_QUEUE = 100_000
+    private const val RETENTION_DAYS = 31L
     private val queue = ConcurrentLinkedQueue<Row>()
     private val queued = AtomicInteger()
-    private var tableReady = false
     private var lastPrune = 0L
     private var lastReport = System.currentTimeMillis()
     private var written = 0L
     private var failed = 0L
     private var dropped = 0L
+
+    private class Row(val headcode: String, val stanox: String, val type: Char, val eventS: Long)
 
     fun enqueue(headcode: String, stanox: String, type: String, exactMs: Long) {
         if (headcode.length != 4 || stanox.isEmpty() || stanox.length > 6) return
@@ -32,17 +36,17 @@ object TdStore {
         queued.incrementAndGet()
     }
 
+    /** Writes up to MAX_BATCH queued rows, prunes hourly and reports once a minute. */
     fun flush() {
         val now = System.currentTimeMillis()
         try {
-            if (!tableReady) createTable()
             val batch = ArrayList<Row>()
             while (batch.size < MAX_BATCH) {
-                val r = queue.poll() ?: break
+                batch.add(queue.poll() ?: break)
                 queued.decrementAndGet()
-                batch.add(r)
             }
             for (chunk in batch.chunked(CHUNK)) {
+                // Values are validated alphanumerics and numbers, so the INSERT is built as text.
                 val values = chunk.joinToString(",") { "('${it.headcode}','${it.stanox}','${it.type}',${it.eventS})" }
                 try {
                     transaction { exec("INSERT OR IGNORE INTO td_events (headcode, stanox, event_type, event_s) VALUES $values") }
@@ -52,14 +56,15 @@ object TdStore {
                     log.warn("td_events write failed: ${e.message}")
                 }
             }
-            if (now - lastPrune > 3600000L) {
+            if (now - lastPrune > 3_600_000L) {
                 lastPrune = now
-                prune(now)
+                val cutoff = Instant.now().minus(RETENTION_DAYS, ChronoUnit.DAYS).epochSecond
+                transaction { exec("DELETE FROM td_events WHERE event_s < $cutoff") }
             }
         } catch (e: Exception) {
             log.warn("TdStore error: ${e.message}")
         }
-        if (now - lastReport >= 60000L) {
+        if (now - lastReport >= 60_000L) {
             log.info("TD store: written=$written failed=$failed dropped=$dropped queued=${queued.get()}")
             written = 0L
             failed = 0L
@@ -67,20 +72,4 @@ object TdStore {
             lastReport = now
         }
     }
-
-    private fun createTable() {
-        transaction {
-            exec("CREATE TABLE IF NOT EXISTS td_events (headcode TEXT NOT NULL, stanox TEXT NOT NULL, event_type TEXT NOT NULL, event_s INTEGER NOT NULL, PRIMARY KEY (headcode, stanox, event_type, event_s)) WITHOUT ROWID")
-            exec("CREATE INDEX IF NOT EXISTS idx_td_events_s ON td_events(event_s)")
-        }
-        tableReady = true
-        log.info("td_events table ready")
-    }
-
-    private fun prune(nowMs: Long) {
-        val cutoff = Retention.cutoffEpochSeconds()
-        transaction { exec("DELETE FROM td_events WHERE event_s < $cutoff") }
-    }
-
-    private class Row(val headcode: String, val stanox: String, val type: Char, val eventS: Long)
 }

@@ -1,8 +1,19 @@
 package com.traintracker.server
 
+import java.io.File
+
+/** Settings from the environment (see /opt/traintracker/env.conf) and fixed file locations. */
 object Config {
     private fun env(name: String): String =
         System.getenv(name) ?: error("Required env var $name is not set")
+
+    private fun optional(name: String): String = System.getenv(name) ?: ""
+
+    /** Web pages, static assets and data files the server reads and writes. */
+    const val DATA_DIR: String = "/opt/traintracker"
+
+    /** The nightly full CIF download. */
+    val CIF_CACHE: File = File(DATA_DIR, "cif_cache.gz")
 
     val port: Int = System.getenv("PORT")?.toIntOrNull() ?: 8080
 
@@ -19,18 +30,17 @@ object Config {
     val scheduleUsername: String = env("SCHEDULE_USERNAME")
     val schedulePassword: String = env("SCHEDULE_PASSWORD")
 
-
     val sqlitePath: String = System.getenv("SQLITE_PATH") ?: "./traintracker.db"
 
-    val hspApiKey: String = System.getenv("HSP_API_KEY") ?: ""
+    val hspApiKey: String = optional("HSP_API_KEY")
 
-    val kbDisruptionsKey: String = System.getenv("KB_DISRUPTIONS_KEY") ?: ""
-    val kbDisruptionsUrl: String = System.getenv("KB_DISRUPTIONS_URL") ?: ""
-    val kbStationsKey: String = System.getenv("KB_STATIONS_KEY") ?: ""
-    val kbStationsSecret: String = System.getenv("KB_STATIONS_SECRET") ?: ""
-    val kbStationsUrl: String = System.getenv("KB_STATIONS_URL") ?: ""
-    val kbTocKey: String = System.getenv("KB_TOC_KEY") ?: ""
-    val kbTocSecret: String = System.getenv("KB_TOC_SECRET") ?: ""
-    val kbTocTokenUrl: String = System.getenv("KB_TOC_TOKEN_URL") ?: ""
-    val kbTocUrl: String = System.getenv("KB_TOC_URL") ?: ""
+    val kbDisruptionsKey: String = optional("KB_DISRUPTIONS_KEY")
+    val kbDisruptionsUrl: String = optional("KB_DISRUPTIONS_URL")
+    val kbStationsKey: String = optional("KB_STATIONS_KEY")
+    val kbStationsSecret: String = optional("KB_STATIONS_SECRET")
+    val kbStationsUrl: String = optional("KB_STATIONS_URL")
+    val kbTocKey: String = optional("KB_TOC_KEY")
+    val kbTocSecret: String = optional("KB_TOC_SECRET")
+    val kbTocTokenUrl: String = optional("KB_TOC_TOKEN_URL")
+    val kbTocUrl: String = optional("KB_TOC_URL")
 }

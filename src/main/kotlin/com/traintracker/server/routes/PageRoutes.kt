@@ -1,5 +1,6 @@
 package com.traintracker.server.routes
 
+import com.traintracker.server.Config
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.ApplicationCall
@@ -11,9 +12,10 @@ import io.ktor.server.routing.get
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
-private const val INDEX_HTML: String = "/opt/traintracker/index.html"
+private const val INDEX_HTML: String = "${Config.DATA_DIR}/index.html"
 private val staticHtmlCache = ConcurrentHashMap<String, String>()
 
+/** Serves a page, read once and cached. Any query string gets a 404. */
 private suspend fun ApplicationCall.serveStaticHtml(path: String, notFoundMsg: String = "Not found") {
     if (request.queryString().isNotEmpty()) {
         respond(HttpStatusCode.NotFound)
@@ -32,7 +34,8 @@ private suspend fun ApplicationCall.serveStaticHtml(path: String, notFoundMsg: S
 
 fun Route.pageRoutes() {
     get("/") { call.serveStaticHtml(INDEX_HTML) }
-    get("/dashboard") { call.serveStaticHtml("/opt/traintracker/dashboard.html", "Dashboard not found") }
+    get("/dashboard") { call.serveStaticHtml("${Config.DATA_DIR}/dashboard.html", "Dashboard not found") }
+    // Client-side routes of the single page app
     listOf(
         "/station/{crs}",
         "/station/{crs}/{date}",

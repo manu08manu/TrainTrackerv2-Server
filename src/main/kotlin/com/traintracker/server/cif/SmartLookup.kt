@@ -1,5 +1,8 @@
 package com.traintracker.server.cif
 
+import com.traintracker.server.database.execUpdate
+import com.traintracker.server.database.queryList
+import com.traintracker.server.database.sqlQuote
 import com.traintracker.server.rdm.RdmFeed
 import com.traintracker.server.rdm.RdmFiles
 import com.traintracker.server.rdm.RdmWatcher
@@ -51,8 +54,6 @@ object SmartLookup {
     private var dbCoverage: Set<String> = emptySet()
     @Volatile
     private var dbSynced = false
-    @Volatile
-    private var tableReady = false
     private val dbLock = Any()
 
     fun keyCount(): Int = index.size
@@ -172,22 +173,10 @@ object SmartLookup {
         reloadOverrides()
     }
 
-    private fun sq(s: String): String = s.replace("'", "''")
-
     private fun rowKey(e: SmartEntry): String = "${e.td}|${e.fromBerth}|${e.toBerth}|${e.stanox}|${e.event}|${e.toLine}|${e.fromLine}|${e.route}|${e.stepType}"
 
     private fun sig(e: SmartEntry): String =
         "${rowKey(e)}|${e.platform}|${e.stepType}|${e.offsetSec?.toString() ?: ""}|${e.comment}|${e.stanme}"
-
-    fun ensureTable() {
-        if (tableReady) return
-        transaction {
-            exec("CREATE TABLE IF NOT EXISTS smart_berths (id INTEGER PRIMARY KEY AUTOINCREMENT, TD TEXT NOT NULL DEFAULT '', StepType TEXT NOT NULL DEFAULT '', FromBerth TEXT NOT NULL DEFAULT '', ToBerth TEXT NOT NULL DEFAULT '', Stanox TEXT NOT NULL DEFAULT '', Stanme TEXT NOT NULL DEFAULT '', Event TEXT NOT NULL DEFAULT '', Platform TEXT NOT NULL DEFAULT '', ToLine TEXT NOT NULL DEFAULT '', BerthOffset INTEGER, Route TEXT NOT NULL DEFAULT '', FromLine TEXT NOT NULL DEFAULT '', Comment TEXT NOT NULL DEFAULT '', Source TEXT NOT NULL DEFAULT '', ChangedBy TEXT, ChangedAt TEXT DEFAULT (datetime('now')))")
-            exec("CREATE INDEX IF NOT EXISTS idx_smart_berths_stanox ON smart_berths(stanox)")
-            exec("CREATE INDEX IF NOT EXISTS idx_smart_berths_key ON smart_berths(TD, FromBerth, ToBerth)")
-        }
-        tableReady = true
-    }
 
     private fun loadDbEntries(): List<SmartEntry> {
         val out = ArrayList<SmartEntry>()
@@ -221,7 +210,6 @@ object SmartLookup {
 
     private fun syncFromSmart(entries: List<SmartEntry>, applyUpdates: Boolean = false) {
         try {
-            ensureTable()
             val dbEntries = loadDbEntries()
             val dbRows = HashMap<String, ArrayList<String>>(dbEntries.size * 2 + 16)
             for (e in dbEntries) dbRows.getOrPut(rowKey(e)) { ArrayList() }.add(sig(e))
@@ -246,7 +234,8 @@ object SmartLookup {
             }
             for (chunk in toInsert.chunked(400)) {
                 val values = chunk.joinToString(",") { e ->
-                    "('${sq(e.td)}','${sq(e.stepType)}','${sq(e.fromBerth)}','${sq(e.toBerth)}','${sq(e.stanox)}','${sq(e.stanme)}','${sq(e.event)}','${sq(e.platform)}','${sq(e.toLine)}',${e.offsetSec?.toString() ?: "NULL"},'${sq(e.route)}','${sq(e.fromLine)}','${sq(e.comment)}','$tag')"
+                    listOf(e.td, e.stepType, e.fromBerth, e.toBerth, e.stanox, e.stanme, e.event, e.platform, e.toLine).joinToString(",", "(", ",") { sqlQuote(it) } +
+                        "${e.offsetSec?.toString() ?: "NULL"},${sqlQuote(e.route)},${sqlQuote(e.fromLine)},${sqlQuote(e.comment)},'$tag')"
                 }
                 transaction {
                     exec("INSERT INTO smart_berths (TD, StepType, FromBerth, ToBerth, Stanox, Stanme, Event, Platform, ToLine, BerthOffset, Route, FromLine, Comment, Source) VALUES $values")
@@ -255,7 +244,10 @@ object SmartLookup {
             for (chunk in toUpdate.chunked(200)) {
                 transaction {
                     for (e in chunk) {
-                        exec("UPDATE smart_berths SET platform = '${sq(e.platform)}', StepType = '${sq(e.stepType)}', BerthOffset = ${e.offsetSec?.toString() ?: "NULL"}, Comment = '${sq(e.comment)}', Stanme = '${sq(e.stanme)}', Source = '$changedTag', ChangedBy = NULL, ChangedAt = datetime('now') WHERE td = '${sq(e.td)}' AND FromBerth = '${sq(e.fromBerth)}' AND ToBerth = '${sq(e.toBerth)}' AND Stanox = '${sq(e.stanox)}' AND Event = '${sq(e.event)}' AND ToLine = '${sq(e.toLine)}' AND FromLine = '${sq(e.fromLine)}' AND Route = '${sq(e.route)}' AND StepType = '${sq(e.stepType)}'")
+                        execUpdate(
+                            "UPDATE smart_berths SET platform = ?, StepType = ?, BerthOffset = ${e.offsetSec?.toString() ?: "NULL"}, Comment = ?, Stanme = ?, Source = ?, ChangedBy = NULL, ChangedAt = datetime('now') WHERE td = ? AND FromBerth = ? AND ToBerth = ? AND Stanox = ? AND Event = ? AND ToLine = ? AND FromLine = ? AND Route = ? AND StepType = ?",
+                            listOf(e.platform, e.stepType, e.comment, e.stanme, changedTag, e.td, e.fromBerth, e.toBerth, e.stanox, e.event, e.toLine, e.fromLine, e.route, e.stepType)
+                        )
                     }
                 }
             }
@@ -278,8 +270,7 @@ object SmartLookup {
     fun reloadOverrides() {
         synchronized(dbLock) {
             try {
-                ensureTable()
-                val entries = loadDbEntries()
+                    val entries = loadDbEntries()
                 val idx = buildIndex(entries, "SMART DB")
                 val a = HashSet<String>()
                 for (e in entries) a.add(e.td)
@@ -294,50 +285,34 @@ object SmartLookup {
     }
 
     fun listBerths(stanox: String, td: String, berth: String, limit: Int): List<Map<String, String>> {
-        val out = ArrayList<Map<String, String>>()
-        try {
-            ensureTable()
-            val sx = stanox.filter { it.isLetterOrDigit() }
-            val t = td.filter { it.isLetterOrDigit() }.uppercase()
-            val b = berth.filter { it.isLetterOrDigit() }.uppercase()
-            val where = ArrayList<String>()
-            if (sx.isNotEmpty()) where.add("stanox = '$sx'")
-            if (t.isNotEmpty()) where.add("td = '$t'")
-            if (b.isNotEmpty()) where.add("(FromBerth = '$b' OR ToBerth = '$b')")
-            val sql = "SELECT id, TD, StepType, FromBerth, ToBerth, Stanox, Stanme, Event, Platform, ToLine, BerthOffset, Route, FromLine, Comment, Source, ChangedBy, ChangedAt FROM smart_berths${if (where.isEmpty()) "" else " WHERE ${where.joinToString(" AND ")}"} ORDER BY TD, FromBerth, ToBerth LIMIT ${limit.coerceIn(1, 500)}"
+        val sx = stanox.filter { it.isLetterOrDigit() }
+        val t = td.filter { it.isLetterOrDigit() }.uppercase()
+        val b = berth.filter { it.isLetterOrDigit() }.uppercase()
+        val where = ArrayList<String>()
+        val args = ArrayList<String>()
+        if (sx.isNotEmpty()) { where.add("stanox = ?"); args.add(sx) }
+        if (t.isNotEmpty()) { where.add("td = ?"); args.add(t) }
+        if (b.isNotEmpty()) { where.add("(FromBerth = ? OR ToBerth = ?)"); args.add(b); args.add(b) }
+        val keys = listOf(
+            "id", "td", "stepType", "fromBerth", "toBerth", "stanox", "stanme", "event", "platform", "toLine",
+            "offsetSec", "route", "fromLine", "comment", "source", "changedBy", "changedAt"
+        )
+        return try {
             transaction {
-                exec(sql) { rs ->
-                    while (rs.next()) {
-                        out.add(
-                            mapOf(
-                                "id" to (rs.getString(1) ?: ""),
-                                "td" to (rs.getString(2) ?: ""),
-                                "stepType" to (rs.getString(3) ?: ""),
-                                "fromBerth" to (rs.getString(4) ?: ""),
-                                "toBerth" to (rs.getString(5) ?: ""),
-                                "stanox" to (rs.getString(6) ?: ""),
-                                "stanme" to (rs.getString(7) ?: ""),
-                                "event" to (rs.getString(8) ?: ""),
-                                "platform" to (rs.getString(9) ?: ""),
-                                "toLine" to (rs.getString(10) ?: ""),
-                                "offsetSec" to (rs.getString(11) ?: ""),
-                                "route" to (rs.getString(12) ?: ""),
-                                "fromLine" to (rs.getString(13) ?: ""),
-                                "comment" to (rs.getString(14) ?: ""),
-                                "source" to (rs.getString(15) ?: ""),
-                                "changedBy" to (rs.getString(16) ?: ""),
-                                "changedAt" to (rs.getString(17) ?: "")
-                            )
-                        )
-                    }
-                }
+                queryList(
+                    "SELECT id, TD, StepType, FromBerth, ToBerth, Stanox, Stanme, Event, Platform, ToLine, BerthOffset, Route, FromLine, Comment, Source, ChangedBy, ChangedAt FROM smart_berths" +
+                        (if (where.isEmpty()) "" else " WHERE ${where.joinToString(" AND ")}") +
+                        " ORDER BY TD, FromBerth, ToBerth LIMIT ${limit.coerceIn(1, 500)}",
+                    args
+                ) { rs -> keys.withIndex().associate { (i, key) -> key to (rs.getString(i + 1) ?: "") } }
             }
         } catch (e: Exception) {
             log.warn("listBerths failed: ${e.message}")
+            emptyList()
         }
-        return out
     }
 
+    /** Adds a manual berth step. Returns an error message, or null on success. */
     fun addBerth(
         td: String,
         from: String,
@@ -365,9 +340,11 @@ object SmartLookup {
         if (st.length > 2 || !st.all { it.isLetterOrDigit() }) return "step type must be up to 2 letters/digits"
         if (offsetSec < -600 || offsetSec > 600) return "offset must be within 600 seconds"
         try {
-            ensureTable()
             transaction {
-                exec("INSERT INTO smart_berths (TD, StepType, FromBerth, ToBerth, Stanox, Event, Platform, BerthOffset, Source, ChangedBy) VALUES ('$t','${sq(st)}','$f','$o','$sx','$ev','${sq(pl)}',$offsetSec,'manual','${sq(changedBy)}')")
+                execUpdate(
+                    "INSERT INTO smart_berths (TD, StepType, FromBerth, ToBerth, Stanox, Event, Platform, BerthOffset, Source, ChangedBy) VALUES (?, ?, ?, ?, ?, ?, ?, $offsetSec, 'manual', ?)",
+                    listOf(t, st, f, o, sx, ev, pl, changedBy)
+                )
             }
         } catch (e: Exception) {
             return "database error: ${e.message}"
@@ -378,7 +355,6 @@ object SmartLookup {
 
     fun deleteBerth(id: Long) {
         try {
-            ensureTable()
             transaction { exec("DELETE FROM smart_berths WHERE id = $id") }
         } catch (e: Exception) {
             log.warn("deleteBerth failed: ${e.message}")

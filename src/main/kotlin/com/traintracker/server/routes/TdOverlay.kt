@@ -1,5 +1,6 @@
 package com.traintracker.server.routes
 
+import com.traintracker.server.database.query
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 import org.slf4j.LoggerFactory
 import java.time.Instant
@@ -11,14 +12,16 @@ import kotlin.math.abs
 
 private val log = LoggerFactory.getLogger("TdOverlay")
 
+/** TD times for one headcode's service day, used to give TRUST events a time to the second. */
 class TdOverlay private constructor(private val byKey: Map<String, List<Long>>) {
     class Result(val minute: String, val seconds: String)
 
+    /** The TD time closest to when TRUST recorded the event (within 15 minutes), or null. */
     fun resolve(stanox: String, eventType: String, trustEventTs: String?): Result? {
         if (byKey.isEmpty() || trustEventTs.isNullOrEmpty()) return null
         val list = byKey["$stanox|$eventType"] ?: return null
         val written = try {
-            LocalDateTime.parse(trustEventTs.replace(' ', 'T')).atZone(ZoneId.of("Europe/London")).toEpochSecond()
+            LocalDateTime.parse(trustEventTs.replace(' ', 'T')).atZone(LONDON).toEpochSecond()
         } catch (e: Exception) {
             return null
         }
@@ -45,7 +48,7 @@ class TdOverlay private constructor(private val byKey: Map<String, List<Long>>) 
                 val to = day.plusHours(36).toEpochSecond()
                 val map = HashMap<String, MutableList<Long>>()
                 transaction {
-                    exec("SELECT stanox, event_type, event_s FROM td_events WHERE headcode='$hc' AND event_s >= $from AND event_s < $to") { rs ->
+                    query("SELECT stanox, event_type, event_s FROM td_events WHERE headcode=? AND event_s >= $from AND event_s < $to", listOf(hc)) { rs ->
                         while (rs.next()) {
                             val t = if (rs.getString(2) == "A") "ARRIVAL" else "DEPARTURE"
                             map.getOrPut("${rs.getString(1)}|$t") { ArrayList() }.add(rs.getLong(3))

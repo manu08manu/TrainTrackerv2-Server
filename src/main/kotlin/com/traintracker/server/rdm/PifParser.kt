@@ -65,12 +65,6 @@ interface PifRecordHandler {
     fun handle(fields: List<String>)
 }
 
-/** Keeps every row of a record type untouched - a ready-made handler for types with no typed class yet. */
-class RawHandler(override val type: String) : PifRecordHandler {
-    val rows = ArrayList<List<String>>()
-    override fun handle(fields: List<String>) { rows.add(fields) }
-}
-
 // ---- LOC (typed) --------------------------------------------------------
 
 data class PifLoc(

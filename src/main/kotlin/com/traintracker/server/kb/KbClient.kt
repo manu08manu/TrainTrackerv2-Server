@@ -1,5 +1,6 @@
 package com.traintracker.server.kb
 
+import com.traintracker.server.Config
 import java.io.StringReader
 import java.net.HttpURLConnection
 import java.net.URI
@@ -11,12 +12,14 @@ import javax.xml.parsers.DocumentBuilder
 import javax.xml.parsers.DocumentBuilderFactory
 import kotlinx.serialization.Serializable
 import org.json.JSONArray
+import org.json.JSONObject
 import org.slf4j.LoggerFactory
 import org.w3c.dom.Element
 import org.xml.sax.InputSource
 
 private val log = LoggerFactory.getLogger("KbClient")
 
+@Serializable
 data class KbIncident(
     val id: String,
     val summary: String,
@@ -28,21 +31,24 @@ data class KbIncident(
     val link: String = ""
 )
 
+@Serializable
 data class NsiDisruption(
     val detail: String,
     val url: String
 )
 
+@Serializable
 data class KbNsiEntry(
     val tocCode: String,
     val tocName: String,
     val status: String,
     val statusDescription: String = "",
-    val disruptions: List<NsiDisruption> = emptyList(),
     val twitterHandle: String = "",
-    val additionalInfo: String = ""
+    val additionalInfo: String = "",
+    val disruptions: List<NsiDisruption> = emptyList()
 )
 
+@Serializable
 data class KbTocEntry(
     val code: String,
     val name: String,
@@ -53,6 +59,7 @@ data class KbTocEntry(
     val lostPropertyUrl: String = ""
 )
 
+@Serializable
 data class KbStation(
     val crs: String,
     val name: String,
@@ -117,16 +124,17 @@ data class KbStationMessages(
     val stationAlerts: String
 )
 
+/** Knowledgebase API client with in-memory caches; on an upstream failure the last cached value is returned. */
 object KbClient {
-    var disruptionsKey: String = ""
-    var disruptionsUrl: String = ""
-    var stationsKey: String = ""
-    var stationsSecret: String = ""
-    var stationsUrl: String = ""
-    var tocKey: String = ""
-    var tocSecret: String = ""
-    var tocTokenUrl: String = ""
-    var tocUrl: String = ""
+    private val disruptionsKey = Config.kbDisruptionsKey
+    private val disruptionsUrl = Config.kbDisruptionsUrl
+    private val stationsKey = Config.kbStationsKey
+    private val stationsSecret = Config.kbStationsSecret
+    private val stationsUrl = Config.kbStationsUrl
+    private val tocKey = Config.kbTocKey
+    private val tocSecret = Config.kbTocSecret
+    private val tocTokenUrl = Config.kbTocTokenUrl
+    private val tocUrl = Config.kbTocUrl
 
     private const val INCIDENTS_TTL_MS = 300000L
     private const val NSI_TTL_MS = 300000L
@@ -173,6 +181,16 @@ object KbClient {
         isXIncludeAware = false
         isExpandEntityReferences = false
     }.newDocumentBuilder()
+
+    /** Parses XML after removing namespace prefixes and declarations, so elements are found by local name. */
+    private fun parseWithoutNamespaces(xml: String): org.w3c.dom.Document {
+        val clean = xml
+            .replace(Regex("<([a-zA-Z0-9_]+):"), "<")
+            .replace(Regex("</([a-zA-Z0-9_]+):"), "</")
+            .replace(Regex("xmlns:[a-zA-Z0-9_]+\\s*=\\s*\"[^\"]*\""), "")
+            .replace(Regex("\\bxmlns\\s*=\\s*\"[^\"]*\""), "")
+        return safeDocumentBuilder().parse(InputSource(StringReader(clean)))
+    }
 
     fun getIncidents(crs: String = ""): List<KbIncident> {
         val key = crs.uppercase()
@@ -300,39 +318,30 @@ object KbClient {
         return token
     }
 
-    private fun get(url: String, key: String, secret: String, tokenUrl: String): String {
-        val conn = URI.create(url).toURL().openConnection() as HttpURLConnection
-        conn.requestMethod = "GET"
-        conn.connectTimeout = 10000
-        conn.readTimeout = 15000
+    /** GET with an API key, or with an OAuth bearer token when [secret] and [tokenUrl] are set. */
+    private fun get(url: String, key: String, secret: String, tokenUrl: String): String = request(url) { conn ->
         if (secret.isNotEmpty() && tokenUrl.isNotEmpty()) {
             conn.setRequestProperty("Authorization", "Bearer ${getBearerToken(key, secret, tokenUrl)}")
         } else {
             conn.setRequestProperty("x-apikey", key)
         }
-        conn.setRequestProperty("Accept-Encoding", "gzip")
-        if (conn.responseCode != 200) {
-            try {
-                conn.errorStream?.use { it.readBytes() }
-            } catch (_: Exception) {
-            }
-            throw Exception("HTTP ${conn.responseCode} from $url")
-        }
-        val encoding = conn.contentEncoding ?: ""
-        val stream = if (encoding.equals("gzip", ignoreCase = true)) GZIPInputStream(conn.inputStream) else conn.inputStream
-        return stream.bufferedReader(Charsets.UTF_8).use { it.readText() }
     }
 
-    private fun postJson(url: String, key: String, body: String): String {
-        val conn = URI.create(url).toURL().openConnection() as HttpURLConnection
+    private fun postJson(url: String, key: String, body: String): String = request(url) { conn ->
         conn.requestMethod = "POST"
-        conn.connectTimeout = 10000
-        conn.readTimeout = 15000
         conn.doOutput = true
         conn.setRequestProperty("x-apikey", key)
         conn.setRequestProperty("Content-Type", "application/json")
-        conn.setRequestProperty("Accept-Encoding", "gzip")
         conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+    }
+
+    /** Sends the request set up by [prepare] and returns the (possibly gzipped) body; throws unless HTTP 200. */
+    private fun request(url: String, prepare: (HttpURLConnection) -> Unit): String {
+        val conn = URI.create(url).toURL().openConnection() as HttpURLConnection
+        conn.connectTimeout = 10000
+        conn.readTimeout = 15000
+        conn.setRequestProperty("Accept-Encoding", "gzip")
+        prepare(conn)
         if (conn.responseCode != 200) {
             try {
                 conn.errorStream?.use { it.readBytes() }
@@ -372,56 +381,43 @@ object KbClient {
         }
     }
 
+    /** An incident that is not cleared and has a summary, else null. [withEnd] keeps its expiry time. */
+    private fun incident(d: JSONObject, withEnd: Boolean): KbIncident? {
+        val summary = d.optString("summary")
+        if (d.optString("status").equals("Cleared", ignoreCase = true) || summary.isEmpty()) return null
+        val ops = d.optJSONArray("affectedOperators") ?: JSONArray()
+        val links = d.optJSONArray("disruptionLinks")
+        return KbIncident(
+            d.optString("id"),
+            summary,
+            stripHtml(d.optString("description")),
+            d.optBoolean("isPlanned", false),
+            d.optString("startDateTime"),
+            if (withEnd) d.optString("expiryDateTime") else "",
+            (0 until ops.length()).map { ops.getJSONObject(it).optString("tocCode") }.filter { it.isNotEmpty() },
+            if (links != null && links.length() > 0) links.getJSONObject(0).optString("uri") else ""
+        )
+    }
+
     private fun parseIncidentsSearchJson(json: String): List<KbIncident> {
         val result = mutableListOf<KbIncident>()
         try {
             val arr = JSONArray(json)
-            for (i in 0 until arr.length()) {
-                val d = arr.getJSONObject(i)
-                val id = d.optString("id")
-                val summary = d.optString("summary")
-                val desc = stripHtml(d.optString("description"))
-                val planned = d.optBoolean("isPlanned", false)
-                val start = d.optString("startDateTime")
-                val end = d.optString("expiryDateTime")
-                val status = d.optString("status")
-                if (status.equals("Cleared", ignoreCase = true)) continue
-                if (summary.isEmpty()) continue
-                val ops = d.optJSONArray("affectedOperators") ?: JSONArray()
-                val operators = (0 until ops.length()).map { ops.getJSONObject(it).optString("tocCode") }.filter { it.isNotEmpty() }
-                val linksArr = d.optJSONArray("disruptionLinks")
-                val link = if (linksArr != null && linksArr.length() > 0) linksArr.getJSONObject(0).optString("uri") else ""
-                result.add(KbIncident(id, summary, desc, planned, start, end, operators, link))
-            }
+            for (i in 0 until arr.length()) incident(arr.getJSONObject(i), withEnd = true)?.let { result.add(it) }
         } catch (e: Exception) {
             log.error("parseIncidentsSearchJson error: ${e.message}")
         }
         return result
     }
 
+    /** Station incidents: one list per station, so the same incident can repeat. */
     private fun parseIncidentsJson(json: String): List<KbIncident> {
         val result = mutableListOf<KbIncident>()
         try {
             val arr = JSONArray(json)
             for (i in 0 until arr.length()) {
-                val stationObj = arr.getJSONObject(i)
-                val disruptions = stationObj.optJSONArray("disruptions") ?: continue
-                for (j in 0 until disruptions.length()) {
-                    val d = disruptions.getJSONObject(j)
-                    val id = d.optString("id")
-                    val summary = d.optString("summary")
-                    val desc = stripHtml(d.optString("description"))
-                    val planned = d.optBoolean("isPlanned", false)
-                    val start = d.optString("startDateTime")
-                    val status = d.optString("status")
-                    if (status.equals("Cleared", ignoreCase = true)) continue
-                    if (summary.isEmpty()) continue
-                    val ops = d.optJSONArray("affectedOperators") ?: JSONArray()
-                    val operators = (0 until ops.length()).map { ops.getJSONObject(it).optString("tocCode") }.filter { it.isNotEmpty() }
-                    val linksArr = d.optJSONArray("disruptionLinks")
-                    val link = if (linksArr != null && linksArr.length() > 0) linksArr.getJSONObject(0).optString("uri") else ""
-                    result.add(KbIncident(id, summary, desc, planned, start, "", operators, link))
-                }
+                val disruptions = arr.getJSONObject(i).optJSONArray("disruptions") ?: continue
+                for (j in 0 until disruptions.length()) incident(disruptions.getJSONObject(j), withEnd = false)?.let { result.add(it) }
             }
         } catch (e: Exception) {
             log.error("parseIncidentsJson error: ${e.message}")
@@ -462,7 +458,12 @@ object KbClient {
                     if (url.isEmpty()) null else NsiDisruption(g.optString("customDetail"), url)
                 }
                 if (tocCode.isNotEmpty()) {
-                    result.add(KbNsiEntry(tocCode, tocName, level.toString(), statusDescription, disruptions, twitterHandle, additionalInfo))
+                    result.add(
+                        KbNsiEntry(
+                            tocCode, tocName, level.toString(), statusDescription,
+                            twitterHandle = twitterHandle, additionalInfo = additionalInfo, disruptions = disruptions
+                        )
+                    )
                 }
             }
         } catch (e: Exception) {
@@ -496,13 +497,7 @@ object KbClient {
     private fun parseTocXml(xml: String): List<KbTocEntry> {
         val result = mutableListOf<KbTocEntry>()
         try {
-            // NOTE: "\b" here is a literal backspace character in the live jar (unlike parseStationXml's "\\b"); kept verbatim.
-            val cleanXml = xml
-                .replace(Regex("<([a-zA-Z0-9_]+):"), "<")
-                .replace(Regex("</([a-zA-Z0-9_]+):"), "</")
-                .replace(Regex("xmlns:[a-zA-Z0-9_]+\\s*=\\s*\"[^\"]*\""), "")
-                .replace(Regex("\bxmlns\\s*=\\s*\"[^\"]*\""), "")
-            val doc = safeDocumentBuilder().parse(InputSource(StringReader(cleanXml)))
+            val doc = parseWithoutNamespaces(xml)
             val tocs = doc.getElementsByTagName("TrainOperatingCompany")
             for (i in 0 until tocs.length) {
                 val node = tocs.item(i) as? Element ?: continue
@@ -528,12 +523,7 @@ object KbClient {
 
     private fun parseStationXml(xml: String): KbStation? {
         return try {
-            val cleanXml = xml
-                .replace(Regex("<([a-zA-Z0-9_]+):"), "<")
-                .replace(Regex("</([a-zA-Z0-9_]+):"), "</")
-                .replace(Regex("xmlns:[a-zA-Z0-9_]+\\s*=\\s*\"[^\"]*\""), "")
-                .replace(Regex("\\bxmlns\\s*=\\s*\"[^\"]*\""), "")
-            val doc = safeDocumentBuilder().parse(InputSource(StringReader(cleanXml)))
+            val doc = parseWithoutNamespaces(xml)
             val stations = doc.getElementsByTagName("StationV4.0")
             if (stations.length == 0) return null
             val node = stations.item(0) as? Element ?: return null

@@ -1,15 +1,22 @@
 package com.traintracker.server.routes
 
 import com.traintracker.server.cif.CorpusLookup
+import com.traintracker.server.database.Allocations
 import com.traintracker.server.database.AppDatabase
 import com.traintracker.server.database.AssociationRecord
+import com.traintracker.server.database.SCHEDULE_DATE_SCOPE_SQL
 import com.traintracker.server.database.effectiveDateFor
+import com.traintracker.server.database.placeholders
+import com.traintracker.server.database.query
 import com.traintracker.server.database.scheduleDateScopeArgs
-import kotlinx.serialization.Serializable
-import org.jetbrains.exposed.v1.core.IColumnType
-import org.jetbrains.exposed.v1.jdbc.JdbcTransaction
-import org.jetbrains.exposed.v1.core.VarCharColumnType
 import java.time.LocalDate
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
+import org.jetbrains.exposed.v1.jdbc.JdbcTransaction
+import org.jetbrains.exposed.v1.jdbc.transactions.transaction
+
+// CIF associations: VV = divide (split), JJ = join, NP = next working (the train this one forms).
 
 @Serializable
 data class SplitCandidate(
@@ -30,6 +37,7 @@ data class StockNeighbourCandidate(
     val date: String? = null
 )
 
+/** Associations of a set of services, with the schedule facts needed to judge them. */
 data class AssociationContext(
     val assocMap: Map<String, List<AssociationRecord>>,
     val reverseAssocMap: Map<String, List<AssociationRecord>>,
@@ -45,8 +53,8 @@ data class AssociationContext(
 
 fun JdbcTransaction.buildAssociationContext(uids: Set<String>, date: String = LocalDate.now().toString()): AssociationContext {
     val effDate = effectiveDateFor(date)
-    val assocMap = AppDatabase.getAssociationsForUids(uids)
-    val reverseAssocMap = AppDatabase.getReverseAssociationsForUids(uids)
+    val assocMap = AppDatabase.associationsFrom(uids)
+    val reverseAssocMap = AppDatabase.associationsTo(uids)
     val allAssocUids = (assocMap.values.flatten().map { it.assocUid } + reverseAssocMap.values.flatten().map { it.mainUid }).toSet()
     val assocHeadcodes = mutableMapOf<String, String>()
     val assocEffectiveLos = mutableMapOf<String, String>()
@@ -55,14 +63,11 @@ fun JdbcTransaction.buildAssociationContext(uids: Set<String>, date: String = Lo
     val assocAllStops = mutableMapOf<String, MutableSet<String>>()
     val svcTermini = mutableMapOf<String, String>()
     val assocOriginTimes = mutableMapOf<String, String>()
-    val assocUnits = AppDatabase.getUnitsForUids(allAssocUids + uids, date)
+    val assocUnits = Allocations.unitsForUids(allAssocUids + uids, date)
     if (allAssocUids.isNotEmpty()) {
-        val allAssocUidsList = allAssocUids.toList()
-        val placeholders1 = allAssocUidsList.joinToString(",") { "?" }
-        val args1 = allAssocUidsList.map { (VarCharColumnType() as IColumnType<*>) to (it as Any?) }
-        exec(
-            "SELECT uid, headcode, tiploc, stop_type, stp_indicator, scheduled_time FROM schedules WHERE uid IN ($placeholders1) AND stp_indicator != 'C' AND ((schedule_start_date <= ? AND schedule_end_date >= ? AND days_run LIKE ?) OR schedule_date = '') ORDER BY CASE stp_indicator WHEN 'N' THEN 0 WHEN 'O' THEN 1 WHEN 'P' THEN 2 ELSE 3 END",
-            args1 + scheduleDateScopeArgs(effDate)
+        query(
+            "SELECT uid, headcode, tiploc, stop_type, stp_indicator, scheduled_time FROM schedules WHERE uid IN (${placeholders(allAssocUids.size)}) AND stp_indicator != 'C' AND $SCHEDULE_DATE_SCOPE_SQL ORDER BY CASE stp_indicator WHEN 'N' THEN 0 WHEN 'O' THEN 1 WHEN 'P' THEN 2 ELSE 3 END",
+            allAssocUids.toList() + scheduleDateScopeArgs(effDate)
         ) { rs ->
             while (rs.next()) {
                 val rUid = rs.getString("uid") ?: continue
@@ -82,12 +87,9 @@ fun JdbcTransaction.buildAssociationContext(uids: Set<String>, date: String = Lo
         }
     }
     if (uids.isNotEmpty()) {
-        val uidsList = uids.toList()
-        val placeholders2 = uidsList.joinToString(",") { "?" }
-        val args2 = uidsList.map { (VarCharColumnType() as IColumnType<*>) to (it as Any?) }
-        exec(
-            "SELECT uid, tiploc, stp_indicator FROM schedules WHERE uid IN ($placeholders2) AND stop_type='LT' AND stp_indicator IN ('N','O','P') AND ((schedule_start_date <= ? AND schedule_end_date >= ? AND days_run LIKE ?) OR schedule_date = '') ORDER BY CASE stp_indicator WHEN 'N' THEN 0 WHEN 'O' THEN 1 ELSE 2 END",
-            args2 + scheduleDateScopeArgs(effDate)
+        query(
+            "SELECT uid, tiploc, stp_indicator FROM schedules WHERE uid IN (${placeholders(uids.size)}) AND stop_type='LT' AND stp_indicator IN ('N','O','P') AND $SCHEDULE_DATE_SCOPE_SQL ORDER BY CASE stp_indicator WHEN 'N' THEN 0 WHEN 'O' THEN 1 ELSE 2 END",
+            uids.toList() + scheduleDateScopeArgs(effDate)
         ) { rs ->
             while (rs.next()) {
                 val rUid = rs.getString("uid") ?: continue
@@ -102,6 +104,7 @@ fun JdbcTransaction.buildAssociationContext(uids: Set<String>, date: String = Lo
     )
 }
 
+/** The date of a connecting service from a CIF date indicator: N = next day, P = previous day, S = same day. */
 fun resolveConnectionDate(requestedDate: String, dateIndicator: Char?, fallbackNextDay: Boolean = false): String {
     val base = LocalDate.parse(requestedDate)
     return when (dateIndicator) {
@@ -127,6 +130,7 @@ private fun pickFormsCandidate(formsCands: List<FormsCandidate>, myUnits: Set<St
     return if (stpFiltered.size == 1) stpFiltered.first() else if (fShare.size == 1) fShare.first() else null
 }
 
+/** The service this one forms at its terminus (JJ/NP starting where it terminates), when unambiguous. */
 fun resolveNextForms(uid: String, ctx: AssociationContext, date: String): FormsCandidate? {
     val assocs = ctx.assocMap[uid] ?: return null
     val formsCands = mutableListOf<FormsCandidate>()
@@ -158,6 +162,10 @@ private fun unitsCompatible(mine: Set<String>, theirs: Set<String>): Boolean {
     return mine.any { it in theirs }
 }
 
+/**
+ * Adds association details to a service: the portions it divides into (VV), the train it joins or is joined by
+ * (JJ/NP mid-journey), what it forms at its terminus, and the train it split from.
+ */
 fun applyAssociations(svc: ServiceResponse, ctx: AssociationContext, date: String = LocalDate.now().toString()): ServiceResponse {
     val uid = svc.uid
     var formsUid2: String? = null
@@ -358,4 +366,27 @@ fun applyAssociations(svc: ServiceResponse, ctx: AssociationContext, date: Strin
             )
         )
     } else svc
+}
+
+data class ChainHop(val uid: String, val headcode: String, val date: String)
+
+/** Follows "forms" associations from a service, up to [maxDepth] hops, stopping at a loop or a cancelled service. */
+suspend fun walkFormsChain(startUid: String, startDate: String, maxDepth: Int = 5): List<ChainHop> {
+    val hops = mutableListOf<ChainHop>()
+    val seen = mutableSetOf(startUid)
+    var curUid = startUid
+    var curDate = startDate
+    repeat(maxDepth) {
+        val next = withContext(Dispatchers.IO) {
+            transaction { resolveNextForms(curUid, buildAssociationContext(setOf(curUid), curDate), curDate) }
+        } ?: return hops
+        if (next.uid in seen) return hops
+        val nextDate = resolveConnectionDate(curDate, next.dateIndicator)
+        if (withContext(Dispatchers.IO) { transaction { isUidWhollyCancelled(next.uid, nextDate) } }) return hops
+        hops.add(ChainHop(next.uid, next.headcode, nextDate))
+        seen.add(next.uid)
+        curUid = next.uid
+        curDate = nextDate
+    }
+    return hops
 }

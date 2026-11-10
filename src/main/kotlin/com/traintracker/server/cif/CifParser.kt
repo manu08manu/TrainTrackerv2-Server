@@ -12,16 +12,12 @@ import io.ktor.client.request.header
 import io.ktor.client.statement.bodyAsChannel
 import io.ktor.http.isSuccess
 import io.ktor.utils.io.readAvailable
-import java.io.BufferedReader
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
-import java.io.InputStreamReader
-import java.time.DayOfWeek
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.util.Base64
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.GZIPInputStream
 import org.jetbrains.exposed.v1.jdbc.batchInsert
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
@@ -30,6 +26,7 @@ import org.slf4j.LoggerFactory
 
 private val log = LoggerFactory.getLogger("CifParser")
 
+/** One stop of a schedule, as stored in the schedules table. */
 data class CifStop(
     val uid: String,
     val headcode: String,
@@ -53,257 +50,86 @@ data class CifStop(
     val daysRun: String = "1111111"
 )
 
-object CifParser {
-    private val debugLoggedOnce = AtomicBoolean(false)
+/** Inserts stops into schedules; call inside a transaction. */
+fun insertStops(stops: List<CifStop>, scheduleDate: (CifStop) -> String) {
+    Schedules.batchInsert(stops, ignore = true) { s ->
+        this[Schedules.uid] = s.uid
+        this[Schedules.headcode] = s.headcode
+        this[Schedules.tsc] = s.tsc
+        this[Schedules.stpIndicator] = s.stpIndicator
+        this[Schedules.tiploc] = s.tiploc
+        this[Schedules.crs] = s.crs
+        this[Schedules.scheduledTime] = s.scheduledTime
+        this[Schedules.scheduledArrival] = s.scheduledArrival
+        this[Schedules.scheduledDeparture] = s.scheduledDeparture
+        this[Schedules.platform] = s.platform
+        this[Schedules.isPass] = s.isPass
+        this[Schedules.stopType] = s.stopType
+        this[Schedules.originTiploc] = s.originTiploc
+        this[Schedules.destTiploc] = s.destTiploc
+        this[Schedules.originCrs] = s.originCrs
+        this[Schedules.destCrs] = s.destCrs
+        this[Schedules.scheduleStartDate] = s.scheduleStartDate
+        this[Schedules.scheduleEndDate] = s.scheduleEndDate
+        this[Schedules.scheduleDate] = scheduleDate(s)
+        this[Schedules.stopSequence] = s.sequence
+        this[Schedules.daysRun] = s.daysRun
+    }
+}
 
-    private data class TiplocData(
-        val allTiplocs: Set<String>,
-        val assocLines: List<String>
+object CifParser {
+
+    /** One schedule location, read from either the CIF or the VSTP JSON layout. */
+    private class RawLocation(
+        val type: String,   // LO, LI or LT; "" when the CIF leaves it blank
+        val tiploc: String,
+        val publicDep: String,
+        val publicArr: String,
+        val wttDep: String,
+        val wttArr: String,
+        val pass: String,
+        val platform: String?,
     )
 
-    private fun collectTiplocs(gzipFile: File): TiplocData {
-        val allTiplocs = HashSet<String>(16000)
-        val assocLines = mutableListOf<String>()
-        GZIPInputStream(FileInputStream(gzipFile)).use { gis ->
-            BufferedReader(InputStreamReader(gis, Charsets.UTF_8)).use { reader ->
-                var line = reader.readLine()
-                while (line != null) {
-                    val trimmed = line.trim()
-                    if (trimmed.startsWith("{\"TiplocV1\"")) {
-                        try {
-                            val obj = JSONObject(trimmed).optJSONObject("TiplocV1")
-                            if (obj != null) {
-                                val tiplocCode = obj.optString("tiploc_code", "").trim()
-                                if (tiplocCode.isNotEmpty()) allTiplocs.add(tiplocCode)
-                            }
-                        } catch (e: Exception) {
-                        }
-                    } else if (trimmed.startsWith("{\"JsonAssociationV1\"")) {
-                        assocLines.add(trimmed)
-                    }
-                    line = reader.readLine()
-                }
-            }
-        }
-        return TiplocData(allTiplocs, assocLines)
-    }
+    private fun platformOf(loc: JSONObject): String? =
+        loc.optString("CIF_platform", "").trim().ifEmpty { loc.optString("platform", "").trim() }.ifEmpty { null }
 
-    fun parseAndPersist(gzipFile: File): Int {
-        val tiplocData = collectTiplocs(gzipFile)
-        ScheduleCancellations.begin()
-        LocationData.onCif(tiplocData.allTiplocs)
-        val today = LocalDate.now()
-        val todayDow = today.dayOfWeek
-        val buffer = mutableListOf<CifStop>()
-        var total = 0
-        var scheduleCount = 0
-        var validCount = 0
+    private fun cifLocation(loc: JSONObject) = RawLocation(
+        type = loc.optString("location_type", ""),
+        tiploc = loc.optString("tiploc_code", "").trim(),
+        publicDep = loc.optString("public_departure", "").trim(),
+        publicArr = loc.optString("public_arrival", "").trim(),
+        wttDep = loc.optString("departure", "").trim(),
+        wttArr = loc.optString("arrival", "").trim(),
+        pass = loc.optString("pass", "").trim(),
+        platform = platformOf(loc),
+    )
 
-        fun flush() {
-            if (buffer.isEmpty()) return
-            transaction {
-                Schedules.batchInsert(buffer, ignore = true) { s ->
-                    this[Schedules.uid] = s.uid
-                    this[Schedules.headcode] = s.headcode
-                    this[Schedules.tsc] = s.tsc
-                    this[Schedules.stpIndicator] = s.stpIndicator.toString().first()
-                    this[Schedules.tiploc] = s.tiploc
-                    this[Schedules.crs] = s.crs
-                    this[Schedules.scheduledTime] = s.scheduledTime
-                    this[Schedules.scheduledArrival] = s.scheduledArrival
-                    this[Schedules.scheduledDeparture] = s.scheduledDeparture
-                    this[Schedules.platform] = s.platform
-                    this[Schedules.isPass] = s.isPass
-                    this[Schedules.stopType] = s.stopType
-                    this[Schedules.originTiploc] = s.originTiploc
-                    this[Schedules.destTiploc] = s.destTiploc
-                    this[Schedules.originCrs] = s.originCrs
-                    this[Schedules.destCrs] = s.destCrs
-                    this[Schedules.scheduleStartDate] = s.scheduleStartDate
-                    this[Schedules.scheduleEndDate] = s.scheduleEndDate
-                    this[Schedules.scheduleDate] = today.toString()
-                    this[Schedules.stopSequence] = s.sequence
-                    this[Schedules.daysRun] = s.daysRun
-                }
-            }
-            total += buffer.size
-            buffer.clear()
-        }
-
-        GZIPInputStream(FileInputStream(gzipFile)).use { gis ->
-            BufferedReader(InputStreamReader(gis, Charsets.UTF_8)).use { reader ->
-                var line = reader.readLine()
-                while (line != null) {
-                    val trimmed = line.trim()
-                    if (trimmed.startsWith("{\"JsonScheduleV1\"")) {
-                        scheduleCount++
-                        try {
-                            val sched = JSONObject(trimmed).optJSONObject("JsonScheduleV1")
-                            if (sched != null && sched.optString("CIF_stp_indicator", "") == "C") {
-                                ScheduleCancellations.collect(sched)
-                            }
-                            if (sched != null) {
-                                val parsed = parseSchedule(sched, today, todayDow)
-                                if (parsed.isNotEmpty()) {
-                                    buffer.addAll(parsed)
-                                    validCount++
-                                    if (buffer.size >= 5000) flush()
-                                }
-                            }
-                        } catch (e: Exception) {
-                        }
-                    }
-                    line = reader.readLine()
-                }
-            }
-        }
-        flush()
-        ScheduleCancellations.persist()
-        log.info("CIF JSON: $scheduleCount schedules, $validCount run today → $total stops")
-
-        val associations = mutableListOf<AssociationRecord>()
-        for (trimmed in tiplocData.assocLines) {
-            try {
-                val assoc = JSONObject(trimmed).optJSONObject("JsonAssociationV1")
-                if (assoc == null) continue
-                val mainUid = assoc.optString("main_train_uid", "").trim()
-                val assocUid = assoc.optString("assoc_train_uid", "").trim()
-                val assocTiploc = assoc.optString("location", "").trim()
-                val assocType = assoc.optString("category", "").trim()
-                val stpInd = assoc.optString("CIF_stp_indicator", "").firstOrNull()
-                val validFrom = parseDate(assoc.optString("assoc_start_date", ""))
-                val validTo = parseDate(assoc.optString("assoc_end_date", ""))
-                val daysRun = assoc.optString("assoc_days", "")
-                val dateInd = assoc.optString("date_indicator", "").firstOrNull()
-                val okStp = stpInd != null
-                val okDates = validFrom != null && validTo != null && !today.isBefore(validFrom) && !today.isAfter(validTo)
-                val okDow = daysRun.length < 7 || daysRun[todayDow.value - 1] == '1'
-                if (okStp && okDates && okDow && mainUid.isNotEmpty() && assocUid.isNotEmpty() && assocTiploc.isNotEmpty()) {
-                    associations.add(AssociationRecord(mainUid, assocUid, assocTiploc, assocType, stpInd, dateInd))
-                }
-            } catch (e: Exception) {
-            }
-        }
-        AppDatabase.replaceAssociations(associations)
-        log.info("CIF associations: ${associations.size} parsed and stored")
-
-        try {
-            val overrideCount = transaction {
-                var count = 0
-                exec("UPDATE schedules SET crs = (SELECT crs FROM tiploc_crs_overrides o WHERE o.tiploc = schedules.tiploc) WHERE tiploc IN (SELECT tiploc FROM tiploc_crs_overrides WHERE LENGTH(crs) != 0)")
-                exec("SELECT changes() as n") { rs -> if (rs.next()) count = rs.getInt("n") }
-                count
-            }
-            log.info("CIF post-import: applied $overrideCount CRS override(s) to schedules table")
-        } catch (e: Exception) {
-            log.warn("CIF post-import: failed to apply CRS overrides: ${e.message}")
-        }
-        return total
-    }
-
-    fun parseScheduleForVstpKafka(sched: JSONObject): List<CifStop> {
-        val today = LocalDate.now()
-        val todayDow = today.dayOfWeek
-        val stpIndicator = sched.optString("CIF_stp_indicator", "").firstOrNull() ?: return emptyList()
-        if (stpIndicator == 'C') return emptyList()
-        if (sched.optString("transaction_type", "") == "Delete") return emptyList()
-        val validFromStr = sched.optString("schedule_start_date", "")
-        val validToStr = sched.optString("schedule_end_date", "")
-        val validFrom = parseDate(validFromStr) ?: return emptyList()
-        val validTo = parseDate(validToStr) ?: return emptyList()
-        if (today.isBefore(validFrom) || today.isAfter(validTo)) return emptyList()
-        val daysRun = sched.optString("schedule_days_runs", "")
-        if (daysRun.length < 7 || daysRun[todayDow.value - 1] != '1') return emptyList()
-        val uid = sched.optString("CIF_train_uid", "").trim()
-        if (uid.isEmpty()) return emptyList()
-        val segArray = sched.optJSONArray("schedule_segment")
-        val seg = if (segArray != null && segArray.length() > 0) segArray.optJSONObject(0)
-        else sched.optJSONObject("schedule_segment") ?: return emptyList()
-        val headcode = seg.optString("signalling_id", "").trim()
-        val tscCode = seg.optString("CIF_train_service_code", "").trim()
-        if (headcode.isEmpty()) return emptyList()
-        val locs = seg.optJSONArray("schedule_location") ?: return emptyList()
-        if (locs.length() == 0) return emptyList()
-
-        var originTiploc = ""
-        var destTiploc = ""
-        for (i in 0 until locs.length()) {
-            val loc = locs.optJSONObject(i) ?: continue
-            val activity = loc.optString("CIF_activity", "").trim()
-            val tiploc = loc.optJSONObject("location")
-                ?.optJSONObject("tiploc")
-                ?.optString("tiploc_id", "")
-                ?.trim()
-                ?: ""
-            when (activity) {
-                "TB" -> originTiploc = tiploc
-                "TF" -> destTiploc = tiploc
-            }
-        }
-        val originCrs = CorpusLookup.crsFromTiploc(originTiploc)
-        val destCrs = CorpusLookup.crsFromTiploc(destTiploc)
-
-        val stops = mutableListOf<CifStop>()
-        for (i in 0 until locs.length()) {
-            val loc = locs.optJSONObject(i) ?: continue
-            val activity = loc.optString("CIF_activity", "").trim()
-            val tiploc = loc.optJSONObject("location")
-                ?.optJSONObject("tiploc")
-                ?.optString("tiploc_id", "")
-                ?.trim()
-                ?: ""
-            if (tiploc.isEmpty()) continue
-            val locType = when (activity) {
+    private fun vstpLocation(loc: JSONObject): RawLocation {
+        fun time(key: String) = loc.optString(key, "").trim().replace(" ", "")
+        return RawLocation(
+            type = when (loc.optString("CIF_activity", "").trim()) {
                 "TB" -> "LO"
                 "TF" -> "LT"
                 else -> "LI"
-            }
-            val pubDep = loc.optString("public_departure_time", "").trim().replace(" ", "")
-            val pubArr = loc.optString("public_arrival_time", "").trim().replace(" ", "")
-            val wttDep = loc.optString("scheduled_departure_time", "").trim().replace(" ", "")
-            val wttArr = loc.optString("scheduled_arrival_time", "").trim().replace(" ", "")
-            val pass = loc.optString("scheduled_pass_time", "").trim().replace(" ", "")
-            val crs = CorpusLookup.crsFromTiploc(tiploc)
-            val isPass = locType == "LI" && pubDep.isEmpty() && pubArr.isEmpty() && pass.isNotEmpty()
-            val schedArr = formatHHMM(pubArr.ifEmpty { wttArr }).ifEmpty { null }
-            val schedDep = formatHHMM(pubDep.ifEmpty { wttDep }).ifEmpty { null }
-            val schedTime = when {
-                locType == "LO" -> schedDep ?: ""
-                locType == "LT" -> schedArr ?: ""
-                pubDep.isNotEmpty() -> formatHHMM(pubDep)
-                pubArr.isNotEmpty() -> formatHHMM(pubArr)
-                pass.isNotEmpty() -> formatHHMM(pass)
-                wttDep.isNotEmpty() -> formatHHMM(wttDep)
-                wttArr.isNotEmpty() -> formatHHMM(wttArr)
-                else -> ""
-            }
-            if (schedTime.isEmpty() && locType != "LT") continue
-            stops += CifStop(
-                uid = uid,
-                headcode = headcode,
-                tsc = tscCode,
-                stpIndicator = stpIndicator,
-                tiploc = tiploc,
-                crs = crs,
-                scheduledTime = schedTime,
-                scheduledArrival = schedArr,
-                scheduledDeparture = schedDep,
-                platform = loc.optString("CIF_platform", "").trim().ifEmpty { loc.optString("platform", "").trim() }.ifEmpty { null },
-                isPass = isPass,
-                stopType = locType,
-                originTiploc = originTiploc,
-                destTiploc = destTiploc,
-                originCrs = originCrs,
-                destCrs = destCrs,
-                scheduleStartDate = validFromStr,
-                scheduleEndDate = validToStr,
-                sequence = i
-            )
-        }
-        return stops
+            },
+            tiploc = loc.optJSONObject("location")?.optJSONObject("tiploc")?.optString("tiploc_id", "")?.trim() ?: "",
+            publicDep = time("public_departure_time"),
+            publicArr = time("public_arrival_time"),
+            wttDep = time("scheduled_departure_time"),
+            wttArr = time("scheduled_arrival_time"),
+            pass = time("scheduled_pass_time"),
+            platform = platformOf(loc),
+        )
     }
 
-    private fun parseSchedule(sched: JSONObject, today: LocalDate, todayDow: DayOfWeek): List<CifStop> {
+    fun parseVstpSchedule(sched: JSONObject): List<CifStop> = parseSchedule(sched, LocalDate.now(), vstp = true)
+
+    /**
+     * Stops of a schedule valid today. Cancellations ('C') and deletes give no stops. A VSTP schedule must also
+     * run on today's weekday and keeps the default days_run; a CIF schedule stores its own days_run.
+     */
+    private fun parseSchedule(sched: JSONObject, today: LocalDate, vstp: Boolean): List<CifStop> {
         val stpIndicator = sched.optString("CIF_stp_indicator", "").firstOrNull() ?: return emptyList()
         if (stpIndicator == 'C') return emptyList()
         if (sched.optString("transaction_type", "") == "Delete") return emptyList()
@@ -312,67 +138,54 @@ object CifParser {
         val validFrom = parseDate(validFromStr) ?: return emptyList()
         val validTo = parseDate(validToStr) ?: return emptyList()
         if (today.isBefore(validFrom) || today.isAfter(validTo)) return emptyList()
-        val scheduleDaysRun = sched.optString("schedule_days_runs", "").ifEmpty { "1111111" }
+        val daysRunRaw = sched.optString("schedule_days_runs", "")
+        if (vstp && (daysRunRaw.length < 7 || daysRunRaw[today.dayOfWeek.value - 1] != '1')) return emptyList()
+        val daysRun = if (vstp) "1111111" else daysRunRaw.ifEmpty { "1111111" }
         val uid = sched.optString("CIF_train_uid", "").trim()
+        if (vstp && uid.isEmpty()) return emptyList()
         val segArray = sched.optJSONArray("schedule_segment")
-        val seg = if (segArray != null && segArray.length() > 0) segArray.optJSONObject(0)
-        else sched.optJSONObject("schedule_segment") ?: return emptyList()
+        val seg = (if (segArray != null && segArray.length() > 0) segArray.optJSONObject(0) else sched.optJSONObject("schedule_segment"))
+            ?: return emptyList()
         val headcode = seg.optString("signalling_id", "").trim()
         if (headcode.isEmpty()) return emptyList()
-        val tscCode = seg.optString("CIF_train_service_code", "").trim()
+        val tsc = seg.optString("CIF_train_service_code", "").trim()
         val locs = seg.optJSONArray("schedule_location") ?: return emptyList()
         if (locs.length() == 0) return emptyList()
 
-        var originTiploc = ""
-        var destTiploc = ""
-        for (i in 0 until locs.length()) {
-            val loc = locs.optJSONObject(i) ?: continue
-            when (loc.optString("location_type", "")) {
-                "LO" -> originTiploc = loc.optString("tiploc_code", "").trim()
-                "LT" -> destTiploc = loc.optString("tiploc_code", "").trim()
-            }
-        }
+        val locations = List(locs.length()) { i -> locs.optJSONObject(i)?.let { if (vstp) vstpLocation(it) else cifLocation(it) } }
+        val originTiploc = locations.lastOrNull { it?.type == "LO" }?.tiploc ?: ""
+        val destTiploc = locations.lastOrNull { it?.type == "LT" }?.tiploc ?: ""
         val originCrs = CorpusLookup.crsFromTiploc(originTiploc)
         val destCrs = CorpusLookup.crsFromTiploc(destTiploc)
 
-        val stops = mutableListOf<CifStop>()
-        for (i in 0 until locs.length()) {
-            val loc = locs.optJSONObject(i) ?: continue
-            val locType = loc.optString("location_type", "")
-            val tiploc = loc.optString("tiploc_code", "").trim()
-            if (tiploc.isEmpty()) continue
-            val pubDep = loc.optString("public_departure", "").trim()
-            val pubArr = loc.optString("public_arrival", "").trim()
-            val wttDep = loc.optString("departure", "").trim()
-            val wttArr = loc.optString("arrival", "").trim()
-            val pass = loc.optString("pass", "").trim()
-            val isPass = locType == "LI" && pubDep.isEmpty() && pubArr.isEmpty() && pass.isNotEmpty()
-            val schedArr = formatHHMM(pubArr.ifEmpty { wttArr }).ifEmpty { null }
-            val schedDep = formatHHMM(pubDep.ifEmpty { wttDep }).ifEmpty { null }
+        return locations.mapIndexedNotNull { i, loc ->
+            if (loc == null || loc.tiploc.isEmpty()) return@mapIndexedNotNull null
+            val schedArr = formatHHMM(loc.publicArr.ifEmpty { loc.wttArr }).ifEmpty { null }
+            val schedDep = formatHHMM(loc.publicDep.ifEmpty { loc.wttDep }).ifEmpty { null }
             val schedTime = when {
-                locType == "LO" -> schedDep ?: ""
-                locType == "LT" -> schedArr ?: ""
-                pubDep.isNotEmpty() -> formatHHMM(pubDep)
-                pubArr.isNotEmpty() -> formatHHMM(pubArr)
-                pass.isNotEmpty() -> formatHHMM(pass)
-                wttDep.isNotEmpty() -> formatHHMM(wttDep)
-                wttArr.isNotEmpty() -> formatHHMM(wttArr)
+                loc.type == "LO" -> schedDep ?: ""
+                loc.type == "LT" -> schedArr ?: ""
+                loc.publicDep.isNotEmpty() -> formatHHMM(loc.publicDep)
+                loc.publicArr.isNotEmpty() -> formatHHMM(loc.publicArr)
+                loc.pass.isNotEmpty() -> formatHHMM(loc.pass)
+                loc.wttDep.isNotEmpty() -> formatHHMM(loc.wttDep)
+                loc.wttArr.isNotEmpty() -> formatHHMM(loc.wttArr)
                 else -> ""
             }
-            if (schedTime.isEmpty() && locType != "LT") continue
-            stops += CifStop(
+            if (schedTime.isEmpty() && loc.type != "LT") return@mapIndexedNotNull null
+            CifStop(
                 uid = uid,
                 headcode = headcode,
-                tsc = tscCode,
+                tsc = tsc,
                 stpIndicator = stpIndicator,
-                tiploc = tiploc,
-                crs = CorpusLookup.crsFromTiploc(tiploc),
+                tiploc = loc.tiploc,
+                crs = CorpusLookup.crsFromTiploc(loc.tiploc),
                 scheduledTime = schedTime,
                 scheduledArrival = schedArr,
                 scheduledDeparture = schedDep,
-                platform = loc.optString("CIF_platform", "").trim().ifEmpty { loc.optString("platform", "").trim() }.ifEmpty { null },
-                isPass = isPass,
-                stopType = locType.ifEmpty { "LI" },
+                platform = loc.platform,
+                isPass = loc.type == "LI" && loc.publicDep.isEmpty() && loc.publicArr.isEmpty() && loc.pass.isNotEmpty(),
+                stopType = loc.type.ifEmpty { "LI" },
                 originTiploc = originTiploc,
                 destTiploc = destTiploc,
                 originCrs = originCrs,
@@ -380,10 +193,95 @@ object CifParser {
                 scheduleStartDate = validFromStr,
                 scheduleEndDate = validToStr,
                 sequence = i,
-                daysRun = scheduleDaysRun
+                daysRun = daysRun,
             )
         }
-        return stops
+    }
+
+    private fun forEachLine(gzipFile: File, block: (String) -> Unit) {
+        GZIPInputStream(FileInputStream(gzipFile)).bufferedReader(Charsets.UTF_8).useLines { lines ->
+            lines.forEach { block(it.trim()) }
+        }
+    }
+
+    /**
+     * Loads the CIF file into schedules (valid today), associations and cancellation windows. A first pass
+     * collects the current TIPLOCs, which LocationData needs before CRS codes are looked up for the stops.
+     */
+    fun parseAndPersist(gzipFile: File): Int {
+        val tiplocs = HashSet<String>(16000)
+        val associationLines = mutableListOf<String>()
+        forEachLine(gzipFile) { line ->
+            if (line.startsWith("{\"TiplocV1\"")) {
+                try {
+                    JSONObject(line).optJSONObject("TiplocV1")?.optString("tiploc_code", "")?.trim()
+                        ?.takeIf { it.isNotEmpty() }?.let { tiplocs.add(it) }
+                } catch (e: Exception) {
+                }
+            } else if (line.startsWith("{\"JsonAssociationV1\"")) {
+                associationLines.add(line)
+            }
+        }
+        ScheduleCancellations.begin()
+        LocationData.onCif(tiplocs)
+
+        val today = LocalDate.now()
+        val buffer = mutableListOf<CifStop>()
+        var total = 0
+        var scheduleCount = 0
+        var validCount = 0
+        fun flush() {
+            if (buffer.isEmpty()) return
+            transaction { insertStops(buffer) { today.toString() } }
+            total += buffer.size
+            buffer.clear()
+        }
+        forEachLine(gzipFile) { line ->
+            if (!line.startsWith("{\"JsonScheduleV1\"")) return@forEachLine
+            scheduleCount++
+            try {
+                val sched = JSONObject(line).optJSONObject("JsonScheduleV1") ?: return@forEachLine
+                if (sched.optString("CIF_stp_indicator", "") == "C") ScheduleCancellations.collect(sched)
+                val stops = parseSchedule(sched, today, vstp = false)
+                if (stops.isNotEmpty()) {
+                    buffer.addAll(stops)
+                    validCount++
+                    if (buffer.size >= 5000) flush()
+                }
+            } catch (e: Exception) {
+            }
+        }
+        flush()
+        ScheduleCancellations.persist()
+        log.info("CIF JSON: $scheduleCount schedules, $validCount run today → $total stops")
+
+        val associations = associationLines.mapNotNull { line ->
+            try {
+                parseAssociation(JSONObject(line).optJSONObject("JsonAssociationV1") ?: return@mapNotNull null, today)
+            } catch (e: Exception) {
+                null
+            }
+        }
+        AppDatabase.replaceAssociations(associations)
+        log.info("CIF associations: ${associations.size} parsed and stored")
+        return total
+    }
+
+    /** An association valid today, or null. */
+    private fun parseAssociation(assoc: JSONObject, today: LocalDate): AssociationRecord? {
+        val mainUid = assoc.optString("main_train_uid", "").trim()
+        val assocUid = assoc.optString("assoc_train_uid", "").trim()
+        val assocTiploc = assoc.optString("location", "").trim()
+        val assocType = assoc.optString("category", "").trim()
+        val stpInd = assoc.optString("CIF_stp_indicator", "").firstOrNull() ?: return null
+        val validFrom = parseDate(assoc.optString("assoc_start_date", "")) ?: return null
+        val validTo = parseDate(assoc.optString("assoc_end_date", "")) ?: return null
+        val daysRun = assoc.optString("assoc_days", "")
+        val dateInd = assoc.optString("date_indicator", "").firstOrNull()
+        if (today.isBefore(validFrom) || today.isAfter(validTo)) return null
+        if (daysRun.length >= 7 && daysRun[today.dayOfWeek.value - 1] != '1') return null
+        if (mainUid.isEmpty() || assocUid.isEmpty() || assocTiploc.isEmpty()) return null
+        return AssociationRecord(mainUid, assocUid, assocTiploc, assocType, stpInd, dateInd)
     }
 
     private fun parseDate(raw: String): LocalDate? = try {
@@ -398,6 +296,7 @@ object CifParser {
         null
     }
 
+    /** "1234", "1234H" or "12:34..." -> "12:34"; anything else -> "". */
     private fun formatHHMM(raw: String): String {
         val s = raw.trimEnd('H', 'h').trim()
         return when {
@@ -408,6 +307,7 @@ object CifParser {
     }
 }
 
+/** Downloads the full CIF once a day and reloads the timetable from it. */
 object CifDownloader {
     private val http = HttpClient(CIO) {
         install(HttpRedirect) { checkHttpMethod = false }
@@ -416,8 +316,7 @@ object CifDownloader {
 
     suspend fun downloadIfNeeded() {
         val today = LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE)
-        val lastDownload = AppDatabase.getCifMeta("last_download_date")
-        if (lastDownload == today) {
+        if (AppDatabase.getCifMeta("last_download_date") == today) {
             log.info("CIF up to date (last download: $today)")
             return
         }
@@ -428,11 +327,9 @@ object CifDownloader {
 
     private suspend fun download() {
         val auth = Base64.getEncoder().encodeToString("${Config.scheduleUsername}:${Config.schedulePassword}".toByteArray())
-        val response = http.get(Config.scheduleUrl) {
-            header("Authorization", "Basic $auth")
-        }
+        val response = http.get(Config.scheduleUrl) { header("Authorization", "Basic $auth") }
         if (!response.status.isSuccess()) error("CIF download failed: HTTP ${response.status}")
-        val file = File("/opt/traintracker/cif_cache.gz")
+        val file = Config.CIF_CACHE
         val channel = response.bodyAsChannel()
         runCatching {
             FileOutputStream(file).buffered().use { out ->
@@ -445,6 +342,7 @@ object CifDownloader {
             }
         }.onFailure { error("CIF download failed while streaming to disk: ${it.message}") }
         log.info("CIF downloaded ${file.length() / 1024 / 1024}MB — parsing and inserting…")
+        // VSTP ('N') schedules come from Kafka and survive the reload.
         transaction { exec("DELETE FROM schedules WHERE stp_indicator != 'N'") }
         val count = CifParser.parseAndPersist(file)
         log.info("CIF import complete — $count stops inserted")

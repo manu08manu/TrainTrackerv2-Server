@@ -1,6 +1,5 @@
 package com.traintracker.server
 
-import com.traintracker.server.auth.AuthDatabase
 import com.traintracker.server.cif.CifDownloader
 import com.traintracker.server.cif.CorpusLookup
 import com.traintracker.server.cif.LocationData
@@ -14,7 +13,6 @@ import com.traintracker.server.kafka.VstpConsumer
 import com.traintracker.server.kafka.darwinPlatforms
 import com.traintracker.server.kafka.ridToUid
 import com.traintracker.server.kafka.trainIdToRid
-import com.traintracker.server.kb.KbClient
 import com.traintracker.server.routes.configureRoutes
 import io.ktor.http.CacheControl
 import io.ktor.http.HttpHeaders
@@ -39,6 +37,9 @@ import io.ktor.server.plugins.statuspages.StatusPages
 import io.ktor.server.request.path
 import io.ktor.server.response.respond
 import io.ktor.server.routing.IgnoreTrailingSlash
+import java.time.Duration
+import java.time.LocalDateTime
+import java.time.temporal.ChronoUnit
 import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -47,18 +48,13 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import org.slf4j.LoggerFactory
-import java.time.Duration
-import java.time.LocalDateTime
-import java.time.temporal.ChronoUnit
 
 private val log = LoggerFactory.getLogger("Application")
 
 fun main() {
     AppDatabase.init()
-    AuthDatabase.init()
     CorpusLookup.init()
     embeddedServer(Netty, port = Config.port, host = "0.0.0.0") {
         configure()
@@ -67,7 +63,6 @@ fun main() {
 
 private fun Application.configure() {
     install(IgnoreTrailingSlash)
-
     install(ContentNegotiation) {
         json(Json {
             prettyPrint = false
@@ -82,12 +77,8 @@ private fun Application.configure() {
     }
     install(ConditionalHeaders)
     install(CachingHeaders) {
-        options { call, content ->
-            if (call.request.path().startsWith("/css/")) {
-                CachingOptions(cacheControl = CacheControl.MaxAge(maxAgeSeconds = 86400))
-            } else {
-                null
-            }
+        options { call, _ ->
+            if (call.request.path().startsWith("/css/")) CachingOptions(cacheControl = CacheControl.MaxAge(maxAgeSeconds = 86400)) else null
         }
     }
     install(CORS) {
@@ -102,75 +93,39 @@ private fun Application.configure() {
             call.respond(HttpStatusCode.BadRequest, mapOf("error" to (cause.message ?: "Bad request")))
         }
         exception<Exception> { call, cause ->
-            val app = call.application
-            app.log.error("Unhandled error", cause)
+            call.application.log.error("Unhandled error", cause)
             call.respond(HttpStatusCode.InternalServerError, mapOf("error" to "Something went wrong on our side. Please try again."))
         }
     }
 
-    KbClient.disruptionsKey = Config.kbDisruptionsKey
-    KbClient.disruptionsUrl = Config.kbDisruptionsUrl
-    KbClient.stationsKey = Config.kbStationsKey
-    KbClient.stationsSecret = Config.kbStationsSecret
-    KbClient.stationsUrl = Config.kbStationsUrl
-    KbClient.tocKey = Config.kbTocKey
-    KbClient.tocSecret = Config.kbTocSecret
-    KbClient.tocTokenUrl = Config.kbTocTokenUrl
-    KbClient.tocUrl = Config.kbTocUrl
-
     configureRoutes()
 
     val backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.IO + CoroutineName("background"))
-    backgroundScope.launch {
-        startupTasks(backgroundScope)
-    }
-    monitor.subscribe(ApplicationStopped) {
-        backgroundScope.cancel()
-    }
+    backgroundScope.launch { startBackgroundWork(backgroundScope) }
+    monitor.subscribe(ApplicationStopped) { backgroundScope.cancel() }
 }
 
-private suspend fun startupTasks(scope: CoroutineScope) {
+/** Loads saved state, starts the feeds and schedules the daily CIF refresh, hourly pruning and minute flushes. */
+private suspend fun startBackgroundWork(scope: CoroutineScope) {
     log.info("TrainTracker backend starting…")
     try {
         CifDownloader.downloadIfNeeded()
     } catch (e: Exception) {
         log.error("CIF download failed on startup: ${e.message}")
     }
-    withContext(Dispatchers.IO) {
-        val activations = AppDatabase.loadTrainActivations()
-        if (activations.isNotEmpty()) {
-            trainIdToRid.putAll(activations)
-            log.info("Reloaded ${activations.size} train activations from DB")
-        }
-        val ridUidMap = AppDatabase.loadDarwinRidUid()
-        if (ridUidMap.isNotEmpty()) {
-            ridToUid.putAll(ridUidMap)
-            log.info("Reloaded ${ridUidMap.size} Darwin RID→UID mappings from DB")
-        }
-        val stanoxMap = AppDatabase.loadStanoxMap()
-        if (stanoxMap.isNotEmpty()) {
-            CorpusLookup.mergeStanoxFromFeed(stanoxMap)
-            log.info("Stanox map reloaded from DB: ${stanoxMap.size} entries")
-        } else {
-            log.warn("Stanox map empty — delays may not show until next CIF download")
-        }
-        val stanoxTiplocMap = AppDatabase.loadStanoxTiplocMap()
-        if (stanoxTiplocMap.isNotEmpty()) {
-            CorpusLookup.mergeStanoxToTiplocFromFeed(stanoxTiplocMap)
-            log.info("Stanox->tiploc map reloaded from DB: ${stanoxTiplocMap.size} entries")
-        }
-    }
+    restoreSavedState()
     TrustConsumer.start(scope)
     VstpConsumer.start(scope)
     AllocationConsumer.start(scope)
     DarwinConsumer.start(scope)
-    LocationData.register()
+    LocationData.register()   // before SmartLookup.start, which starts the shared RDM watcher
     SmartLookup.start(scope)
     TdConsumer.start(scope)
     log.info("Kafka consumers started")
 
     scope.launch {
-        scheduleDailyAt(3, 15) {
+        while (isActive) {
+            delay(millisUntil(nextTimeOfDay(3, 15)))
             try {
                 log.info("Nightly CIF refresh starting…")
                 CifDownloader.downloadIfNeeded()
@@ -182,25 +137,11 @@ private suspend fun startupTasks(scope: CoroutineScope) {
 
     scope.launch {
         while (isActive) {
-            delay(millisUntilNextHour())
+            delay(millisUntil(LocalDateTime.now().truncatedTo(ChronoUnit.HOURS).plusHours(1)))
             try {
-                AppDatabase.pruneTrustMovements()
-                AppDatabase.pruneTrainLocations()
-                AppDatabase.pruneAllocations()
-                AppDatabase.pruneAllocationLegs()
-                AppDatabase.pruneAllocationHistory()
-                AppDatabase.pruneAllocationChanges()
-                AppDatabase.cleanupDarwinPlatforms()
-                AppDatabase.cleanupDarwinRidUid()
-                AppDatabase.pruneHspCache()
-                AppDatabase.pruneTrainActivations()
-                AppDatabase.pruneVstpAmendments()
-                AppDatabase.pruneCifChangeAlerts()
-                AppDatabase.pruneFeedback()
-                val liveActivations = AppDatabase.loadTrainActivations()
-                trainIdToRid.keys.retainAll(liveActivations.keys)
-                val liveRids = AppDatabase.loadDarwinRidUid()
-                ridToUid.keys.retainAll(liveRids.keys)
+                AppDatabase.pruneExpired()
+                trainIdToRid.keys.retainAll(AppDatabase.loadTrainActivations().keys)
+                ridToUid.keys.retainAll(AppDatabase.loadDarwinRidUid().keys)
                 darwinPlatforms.clear()
                 log.info("TRUST movements, allocations, Darwin platforms and HSP cache pruned")
             } catch (e: Exception) {
@@ -228,19 +169,37 @@ private suspend fun startupTasks(scope: CoroutineScope) {
     log.info("TrainTracker backend ready on port ${Config.port}")
 }
 
-private suspend fun scheduleDailyAt(hour: Int, minute: Int, block: suspend () -> Unit) {
-    while (true) {
-        val now = LocalDateTime.now()
-        var next = now.toLocalDate().atTime(hour, minute)
-        if (!now.isBefore(next)) next = next.plusDays(1)
-        val delayMs = Duration.between(now, next).toMillis()
-        delay(delayMs)
-        block()
+/** Reloads the live lookup maps saved in the database by the previous run. */
+private fun restoreSavedState() {
+    val activations = AppDatabase.loadTrainActivations()
+    if (activations.isNotEmpty()) {
+        trainIdToRid.putAll(activations)
+        log.info("Reloaded ${activations.size} train activations from DB")
+    }
+    val ridUidMap = AppDatabase.loadDarwinRidUid()
+    if (ridUidMap.isNotEmpty()) {
+        ridToUid.putAll(ridUidMap)
+        log.info("Reloaded ${ridUidMap.size} Darwin RID→UID mappings from DB")
+    }
+    val stanoxMap = AppDatabase.loadStanoxMap()
+    if (stanoxMap.isNotEmpty()) {
+        CorpusLookup.mergeStanoxFromFeed(stanoxMap)
+        log.info("Stanox map reloaded from DB: ${stanoxMap.size} entries")
+    } else {
+        log.warn("Stanox map empty — delays may not show until next CIF download")
+    }
+    val stanoxTiplocMap = AppDatabase.loadStanoxTiplocMap()
+    if (stanoxTiplocMap.isNotEmpty()) {
+        CorpusLookup.mergeStanoxToTiplocFromFeed(stanoxTiplocMap)
+        log.info("Stanox->tiploc map reloaded from DB: ${stanoxTiplocMap.size} entries")
     }
 }
 
-private fun millisUntilNextHour(): Long {
+private fun millisUntil(next: LocalDateTime): Long = Duration.between(LocalDateTime.now(), next).toMillis()
+
+/** The next occurrence of a time of day: today if it is still ahead, else tomorrow. */
+private fun nextTimeOfDay(hour: Int, minute: Int): LocalDateTime {
     val now = LocalDateTime.now()
-    val next = now.truncatedTo(ChronoUnit.HOURS).plusHours(1)
-    return Duration.between(now, next).toMillis()
+    val today = now.toLocalDate().atTime(hour, minute)
+    return if (now.isBefore(today)) today else today.plusDays(1)
 }

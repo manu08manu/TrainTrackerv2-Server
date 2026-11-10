@@ -116,8 +116,8 @@ for tiploc in list(tracked_map):
         )
         del tracked_map[tiploc]
 
-# Batch 2026-09-28: ported from tiploc_name_overrides/
-# tiploc_crs_overrides to location_overrides as part of the
+# Batch 2026-09-28: ported from the old tiploc name/CRS override tables
+# to location_overrides as part of the
 # location_overrides merge.
 #
 # A row counts as overridden if it has a non-blank name or CRS.

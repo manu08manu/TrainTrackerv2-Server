@@ -1,6 +1,8 @@
 package com.traintracker.server.cif
 
+import com.traintracker.server.Config
 import com.traintracker.server.database.AppDatabase
+import com.traintracker.server.database.sqlQuote
 import com.traintracker.server.rdm.LocHandler
 import com.traintracker.server.rdm.NlcEntry
 import com.traintracker.server.rdm.NlcParser
@@ -28,7 +30,7 @@ private val log = LoggerFactory.getLogger("LocationData")
  * nothing is applied to CorpusLookup until all three have loaded in this process; until then the
  * previously saved maps stay in use. Load order does not matter.
  *
- * Both RDM files are also written, in full, to tables (pif_loc, nlc_loc) for future use.
+ * Both RDM files are also written, in full, to tables (pif_loc, nlc_loc); RoutePoints reads them.
  * Manual overrides (location_overrides) are untouched and still win inside CorpusLookup.
  */
 object LocationData {
@@ -54,14 +56,13 @@ object LocationData {
     )
 
     /** The nightly CIF download. Its TiplocV1 records are the "current TIPLOC" filter. */
-    private val CIF_CACHE = File("/opt/traintracker/cif_cache.gz")
+    private val CIF_CACHE = Config.CIF_CACHE
     private val TIPLOC_CODE = Regex("\"tiploc_code\"\\s*:\\s*\"([^\"]*)\"")
 
     private val lock = Any()
     @Volatile private var pif: Map<String, PifLoc> = emptyMap()
     @Volatile private var nlc: Map<String, NlcEntry> = emptyMap()
     @Volatile private var cifTiplocs: Set<String>? = null
-    @Volatile private var tablesReady = false
 
     /** Registers the two feeds only. Call before SmartLookup.start, which starts the shared watcher loop. */
     fun register() {
@@ -292,27 +293,13 @@ object LocationData {
 
     // ---- tables --------------------------------------------------------------
 
-    private fun sq(s: String): String = s.replace("'", "''")
-    private fun q(s: String): String = "'${sq(s)}'"
+    private fun q(s: String): String = sqlQuote(s)
     private fun qn(s: String?): String = if (s == null) "NULL" else q(s)
     private fun n(v: Int?): String = v?.toString() ?: "NULL"
-
-    private fun ensureTables() {
-        if (tablesReady) return
-        transaction {
-            exec("CREATE TABLE IF NOT EXISTS pif_loc (tiploc TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', start_date TEXT NOT NULL, end_date TEXT, os_easting INTEGER, os_northing INTEGER, timing_point_type TEXT NOT NULL DEFAULT '', zone TEXT NOT NULL DEFAULT '', stanox TEXT, off_network INTEGER NOT NULL DEFAULT 0, force_lpb TEXT NOT NULL DEFAULT '', action TEXT NOT NULL DEFAULT '', source_file TEXT NOT NULL DEFAULT '', loaded_at TEXT DEFAULT (datetime('now')))")
-            exec("CREATE INDEX IF NOT EXISTS idx_pif_loc_stanox ON pif_loc(stanox)")
-            exec("CREATE TABLE IF NOT EXISTS nlc_loc (tiploc TEXT PRIMARY KEY, nlc TEXT NOT NULL DEFAULT '', capts_ident TEXT NOT NULL DEFAULT '', check_char TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '', capri_desc TEXT NOT NULL DEFAULT '', crs TEXT NOT NULL DEFAULT '', tiploc_owner TEXT NOT NULL DEFAULT '', uic TEXT NOT NULL DEFAULT '', stanox TEXT NOT NULL DEFAULT '', po_mcp TEXT NOT NULL DEFAULT '', source_file TEXT NOT NULL DEFAULT '', loaded_at TEXT DEFAULT (datetime('now')))")
-            exec("CREATE INDEX IF NOT EXISTS idx_nlc_loc_crs ON nlc_loc(crs)")
-            exec("CREATE INDEX IF NOT EXISTS idx_nlc_loc_stanox ON nlc_loc(stanox)")
-        }
-        tablesReady = true
-    }
 
     /** Full replace in one transaction: a failed load leaves the previous contents in place. */
     private fun persistPif(source: String, rows: Collection<PifLoc>) {
         try {
-            ensureTables()
             transaction {
                 exec("DELETE FROM pif_loc")
                 for (chunk in rows.sortedBy { it.tiploc }.chunked(400)) {
@@ -330,7 +317,6 @@ object LocationData {
 
     private fun persistNlc(source: String, rows: Collection<NlcEntry>) {
         try {
-            ensureTables()
             transaction {
                 exec("DELETE FROM nlc_loc")
                 for (chunk in rows.sortedBy { it.tiploc }.chunked(400)) {
