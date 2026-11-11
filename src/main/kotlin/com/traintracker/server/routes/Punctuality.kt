@@ -1,5 +1,7 @@
 package com.traintracker.server.routes
 
+import com.traintracker.server.Retention
+
 import com.traintracker.server.cif.CorpusLookup
 import com.traintracker.server.cif.ScheduleCancellations
 import com.traintracker.server.database.AppDatabase
@@ -222,7 +224,6 @@ data class LeagueResponse(
 )
 
 internal object Punctuality {
-    const val HISTORY_DAYS = 30L
     private const val PLANNED_CANCELLATION = "PD"
     /** Bump when the counting rules change, so stored days are rebuilt. 2: planned (PD) cancellations left out. */
     private const val RULES_VERSION = "2"
@@ -328,7 +329,7 @@ internal object Punctuality {
     }
 
     /**
-     * Days that need working out: the last [HISTORY_DAYS] finished days (a service day ends at noon the next
+     * Days that need working out: the last [Retention.PUNCTUALITY_STORED_DAYS] finished days (a service day ends at noon the next
      * day) from the first full day of movement data, either never built or built before they were final.
      */
     fun daysToBuild(now: LocalDateTime = LocalDateTime.now()): List<LocalDate> = transaction {
@@ -340,7 +341,7 @@ internal object Punctuality {
         }
         val today = now.toLocalDate()
         generateSequence(today.minusDays(1)) { it.minusDays(1) }
-            .takeWhile { !it.isBefore(today.minusDays(HISTORY_DAYS)) && !it.isBefore(dataStart) }
+            .takeWhile { !it.isBefore(today.minusDays(Retention.PUNCTUALITY_STORED_DAYS)) && !it.isBefore(dataStart) }
             .filter { day ->
                 val final = day.plusDays(1).atTime(12, 0)
                 val at = built[day.toString()]
@@ -361,8 +362,8 @@ internal object Punctuality {
         while (isActive) {
             try {
                 transaction {
-                    execUpdate("DELETE FROM punctuality_daily WHERE date < ?", listOf(LocalDate.now().minusDays(HISTORY_DAYS + 1).toString()))
-                    execUpdate("DELETE FROM punctuality_days WHERE date < ?", listOf(LocalDate.now().minusDays(HISTORY_DAYS + 1).toString()))
+                    execUpdate("DELETE FROM punctuality_daily WHERE date < ?", listOf(LocalDate.now().minusDays(Retention.PUNCTUALITY_STORED_DAYS + 1).toString()))
+                    execUpdate("DELETE FROM punctuality_days WHERE date < ?", listOf(LocalDate.now().minusDays(Retention.PUNCTUALITY_STORED_DAYS + 1).toString()))
                 }
                 for (day in daysToBuild()) {
                     if (!isActive) break
@@ -371,7 +372,11 @@ internal object Punctuality {
             } catch (e: Exception) {
                 log.warn("Punctuality build failed: ${e.message}")
             }
-            delay(60 * 60_000L)
+            // Tick at five past each hour, so a day's build lands at 12:05 whatever time the service started.
+            val now = LocalDateTime.now()
+            var next = now.truncatedTo(java.time.temporal.ChronoUnit.HOURS).plusMinutes(5)
+            if (!next.isAfter(now)) next = next.plusHours(1)
+            delay(java.time.Duration.between(now, next).toMillis())
         }
     }
 
@@ -388,9 +393,9 @@ internal object Punctuality {
         val timeTo = clockTime(minOf((toSlot + 1) * SLOT_MINUTES, 1439))
     }
 
-    /** Sums the stored counts for a station and/or operator over the last [HISTORY_DAYS] days and a time window. */
+    /** Sums the stored counts for a station and/or operator over the last [Retention.PUNCTUALITY_SHOWN_DAYS] built days and a time window. */
     fun summary(crs: String?, toc: String?, from: String, to: String): PunctualityResponse = transaction {
-        val since = LocalDate.now().minusDays(HISTORY_DAYS).toString()
+        val since = queryFirst("SELECT date FROM punctuality_days ORDER BY date DESC LIMIT 1 OFFSET ${Retention.PUNCTUALITY_SHOWN_DAYS - 1}") { it.getString(1) } ?: "0000-00-00"
         val window = SlotWindow(from, to)
         val where = listOfNotNull(crs?.let { "crs = ?" to it }, toc?.let { "toc = ?" to it })
         val c = PunctualityCounts()
@@ -425,7 +430,7 @@ internal object Punctuality {
  * 1-4 min late 75, 5-14 late 40, 15+ late 10, cancelled 0. Calls with no report don't score.
  */
 internal object League {
-    val PERIODS = setOf(1, 7, 30)
+    val PERIODS = Retention.LEAGUE_PERIODS
     private const val MIN_SCORED_PER_DAY = 35
 
     /**
@@ -484,7 +489,7 @@ fun Route.punctualityRoutes() {
         call.respond(dbQuery { Punctuality.summary(crs, toc, from, to) })
     }
     get("/league") {
-        val days = call.parameters["days"]?.toIntOrNull()?.takeIf { it in League.PERIODS } ?: 30
+        val days = call.parameters["days"]?.toIntOrNull()?.takeIf { it in League.PERIODS } ?: Retention.PUNCTUALITY_SHOWN_DAYS.toInt()
         val (from, to) = call.timeWindow()
         call.respond(dbQuery { League.table(days, from, to) })
     }

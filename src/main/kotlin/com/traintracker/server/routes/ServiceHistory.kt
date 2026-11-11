@@ -1,5 +1,7 @@
 package com.traintracker.server.routes
 
+import com.traintracker.server.Retention
+
 import com.traintracker.server.ReasonCodes
 import com.traintracker.server.cif.CorpusLookup
 import com.traintracker.server.cif.ScheduleCancellations
@@ -65,7 +67,7 @@ private class Run {
     var cancelReason: String? = null
 }
 
-private const val HISTORY_DAYS = 30
+private const val HISTORY_DAYS = Retention.SERVICE_HISTORY_DAYS
 
 /** "2026-11-10 11:43:49.579" -> LocalDateTime, or null. */
 private fun parseTs(raw: String?): LocalDateTime? = try {
