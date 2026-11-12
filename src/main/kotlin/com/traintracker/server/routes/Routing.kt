@@ -201,15 +201,28 @@ private fun Route.boardRoutes() {
             }
         }
         if (services.isNotEmpty()) {
-            // A headcode changed today is shown under its new headcode.
-            val renamed = dbQuery {
-                HeadcodeAliases.selectAll().where { HeadcodeAliases.oldHeadcode eq safeHc }.firstOrNull()
-                    ?.takeIf { it[HeadcodeAliases.updatedAt].toLocalDate() == LocalDate.now() }
-                    ?.let { it[HeadcodeAliases.newHeadcode] to it[HeadcodeAliases.uid] }
+            // A train that changed identity is listed under its new headcode, whichever headcode is searched.
+            // The alias table has no date, so an alias applies to the requested day and the day either side of its update.
+            val day = LocalDate.parse(date)
+            val aliases = dbQuery {
+                val asOld = HeadcodeAliases.selectAll().where { HeadcodeAliases.oldHeadcode eq safeHc }.toList()
+                val asNew = HeadcodeAliases.selectAll().where { HeadcodeAliases.newHeadcode eq safeHc }.toList()
+                (asOld + asNew)
+                    .filter { kotlin.math.abs(java.time.temporal.ChronoUnit.DAYS.between(it[HeadcodeAliases.updatedAt].toLocalDate(), day)) <= 1L }
+                    .map { Triple(it[HeadcodeAliases.oldHeadcode], it[HeadcodeAliases.newHeadcode], it[HeadcodeAliases.uid]) }
             }
-            if (renamed != null) {
-                val (newHc, uid) = renamed
-                services = services.map { if (uid.isEmpty() || uid == it.uid) it.copy(headcode = newHc) else it }
+            // An alias with a uid belongs to that one train; one without a uid applies to every result (the old rule).
+            val specific = aliases.filter { it.third.isNotEmpty() }
+            val generic = aliases.filter { it.third.isEmpty() && it.first == safeHc }
+            // Searching the new headcode: add the trains that changed to it, which the schedule still files under the old one.
+            for ((oldHc, newHc, uid) in specific) {
+                if (newHc == safeHc && services.none { it.uid == uid }) {
+                    services = services + searchServices(date) { queryByHeadcode(oldHc, date) }.filter { it.uid == uid }
+                }
+            }
+            services = services.map { s ->
+                val to = specific.firstOrNull { it.third == s.uid }?.second ?: generic.firstOrNull()?.second
+                if (to != null) s.copy(headcode = to) else s
             }
         }
         call.respondSearch(headcode, "HEADCODE", services, date, "No schedule found for headcode $headcode")

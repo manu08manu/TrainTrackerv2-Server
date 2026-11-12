@@ -230,14 +230,15 @@ object AppDatabase {
     }
 
     /** (uid, CRS) -> platform from movements of the last 12 hours; the latest report wins. */
-    fun movementPlatforms(uids: Collection<String>): Map<Pair<String, String>, String> {
+    fun movementPlatforms(uids: Collection<String>, svcDate: String): Map<Pair<String, String>, String> {
         if (uids.isEmpty()) return emptyMap()
         return try {
             transaction {
                 val result = mutableMapOf<Pair<String, String>, String>()
                 query(
-                    "SELECT uid, crs, stanox, platform FROM movements WHERE uid IN (${placeholders(uids.size)}) AND platform IS NOT NULL AND platform != '' AND event_ts >= datetime('now', '-12 hours') ORDER BY event_ts ASC",
-                    uids.toList()
+                    "SELECT uid, crs, stanox, platform FROM movements WHERE uid IN (${placeholders(uids.size)}) AND platform IS NOT NULL AND platform != '' AND " +
+                        serviceDaySql("event_ts") + " ORDER BY event_ts ASC",
+                    uids.toList() + serviceDayArgs(svcDate)
                 ) { rs ->
                     while (rs.next()) {
                         val uid = rs.getString("uid") ?: continue
@@ -283,8 +284,10 @@ object AppDatabase {
     }
 
     /** (uid, TIPLOC) -> Darwin platform, from the last 24 hours. */
-    fun darwinPlatforms(uids: Collection<String>): Map<Pair<String, String>, String> {
+    fun darwinPlatforms(uids: Collection<String>, svcDate: String): Map<Pair<String, String>, String> {
         if (uids.isEmpty()) return emptyMap()
+        // darwin_platforms has no service date, only the last 24 hours: use it for today's page and no other.
+        if (svcDate != java.time.LocalDate.now().toString()) return emptyMap()
         return try {
             transaction {
                 queryList(
@@ -303,8 +306,10 @@ object AppDatabase {
     }
 
     /** TIPLOC -> Darwin platform for one uid, from the last 24 hours. */
-    fun darwinPlatforms(uid: String, tiplocs: Collection<String>): Map<String, String> {
+    fun darwinPlatforms(uid: String, tiplocs: Collection<String>, svcDate: String): Map<String, String> {
         if (tiplocs.isEmpty()) return emptyMap()
+        // darwin_platforms has no service date, only the last 24 hours: use it for today's page and no other.
+        if (svcDate != java.time.LocalDate.now().toString()) return emptyMap()
         return try {
             transaction {
                 queryList(

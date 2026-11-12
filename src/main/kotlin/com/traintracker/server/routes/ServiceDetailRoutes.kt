@@ -12,7 +12,6 @@ import com.traintracker.server.database.query
 import com.traintracker.server.database.queryFirst
 import com.traintracker.server.database.scheduleDateScope
 import com.traintracker.server.database.serviceDayArgs
-import com.traintracker.server.database.queryList
 import com.traintracker.server.database.serviceDaySql
 import com.traintracker.server.database.toIsoUtc
 import com.traintracker.server.kafka.LinxMovementWriter
@@ -153,7 +152,9 @@ fun Route.serviceDetailRoutes() {
                 nextWorkingDate = nextWorkings.firstOrNull()?.third,
                 nextWorkingAll = nextWorkings.map { StockNeighbourCandidate(it.first, it.second, it.third) },
                 activatedAt = activation?.updatedAt?.let { toIsoUtc(it) },
-                activationOrigin = route.movedOrigin ?: activation?.originStanox?.let { CorpusLookup.tiplocFromStanox(it) },
+                activationOrigin = route.movedOrigin
+                    ?: allCps.firstOrNull { activationOriginCrs != null && it.crs == activationOriginCrs }?.tiploc
+                    ?: activation?.originStanox?.let { CorpusLookup.tiplocFromStanox(it) },
                 movedDestination = route.movedDestination,
                 legs = legData.groups.map { g ->
                     UnitLegResponse(
@@ -176,6 +177,16 @@ fun Route.serviceDetailRoutes() {
 
 // ---- Calling points ------------------------------------------------------------------------------------
 
+/**
+ * The headcode a train runs under now, after a change of identity (the alias table has no date, so an alias
+ * applies from the start of its service date to 30 hours after it). The timetable keeps the old headcode.
+ */
+private fun JdbcTransaction.currentHeadcode(uid: String, svcDate: String, scheduled: String): String =
+    queryFirst(
+        "SELECT new_headcode FROM headcode_aliases WHERE uid = ? AND old_headcode = ? AND updated_at >= ? AND updated_at < datetime(?, '+30 hours')",
+        listOf(uid, scheduled, svcDate, svcDate)
+    ) { it.getString(1) } ?: scheduled
+
 /** The calling points of a service on a date, with live times, cancellations, delays, platforms and TD-only points. */
 private fun JdbcTransaction.serviceRoute(uid: String, atCrs: String, svcDate: String): ServiceRoute {
     val allRows = Schedules.selectAll().where { (Schedules.uid eq uid) and scheduleDateScope(svcDate) }
@@ -195,8 +206,8 @@ private fun JdbcTransaction.serviceRoute(uid: String, atCrs: String, svcDate: St
     val tiplocNames = CorpusLookup.namesFromTiplocs(tiplocs)
     CorpusLookup.recordMissingFromNames(tiplocs, headcode, uid)
 
-    val darwinDb = AppDatabase.darwinPlatforms(uid, tiplocs)
-    val movementPlatforms = AppDatabase.movementPlatforms(listOf(uid))
+    val darwinDb = AppDatabase.darwinPlatforms(uid, tiplocs, svcDate)
+    val movementPlatforms = AppDatabase.movementPlatforms(listOf(uid), svcDate)
     val ttCancelled = timetableCancelled && moves.arrivals.isEmpty() && moves.departures.isEmpty()
     val cps = rows.map { row ->
         val booked = row[Schedules.tiploc]
@@ -250,7 +261,7 @@ private fun JdbcTransaction.serviceRoute(uid: String, atCrs: String, svcDate: St
     val ltTime = projected.firstOrNull { it.stopType == "LT" }?.effectiveTime() ?: "23:59"
     val ordered = if (loTime > ltTime) projected.sortedFromClock(loTime) { it.effectiveTime() } else projected
     val withPoints = RoutePoints.followChangedLocations(RoutePoints.merge(ordered, uid, svcDate, headcode), uid, svcDate, headcode)
-    return ServiceRoute(headcode, tocCode, tiplocNames, withPoints, movedOrigin, movedOriginReason, cutShort?.to)
+    return ServiceRoute(currentHeadcode(uid, svcDate, headcode), tocCode, tiplocNames, withPoints, movedOrigin, movedOriginReason, cutShort?.to)
 }
 
 /**
@@ -348,57 +359,6 @@ private fun trimToDestination(rows: List<ResultRow>): List<ResultRow> {
     }
     val finalIdx = terminusIndex(deduped)
     return if (finalIdx >= 0) deduped.subList(0, finalIdx + 1) else deduped
-}
-
-/**
- * LINX changes of location for the service day, from S513 codes 06 and 95. There is no published code list:
- * the meanings are inferred from live messages.
- *  - 06 lists the booked location with ModificationStatusIndicator 03 and the one used instead with 04: the
- *    first of the pair is booked TIPLOC -> TIPLOC used instead (9H08: West Drayton instead of Heathrow T2 & 3).
- *  - 95 at a booked location means the train now starts from its replacement ([LocationChanges.movedOrigin]):
- *    9H08 terminated at West Drayton, so 9U27, which it forms, started there instead of Heathrow.
- *  - 93 at a booked location, with a 04 elsewhere in the message, means the train no longer calls there or
- *    beyond and ends at the 04 location instead ([LocationChanges.cutShort]): 9C58, booked to West Croydon,
- *    went from Sydenham to Crystal Palace instead of Penge West onwards.
- * A later message for the same location wins.
- */
-private data class LocationChanges(
-    val replaced: Map<String, String>,
-    val movedOrigin: String?,
-    val movedOriginReason: String?,
-    val cutShort: CutShort?,
-)
-
-/** Code 93: no calls from booked TIPLOC [from] onwards; the train ends at [to], due at [time] (HH:MM). */
-private data class CutShort(val from: String, val to: String, val time: String, val reason: String?)
-
-private fun JdbcTransaction.locationChanges(uid: String, svcDate: String): LocationChanges {
-    val replaced = mutableMapOf<String, String>()
-    var startMovedFrom: String? = null
-    var startMovedTo: String? = null
-    var startMovedReason: String? = null
-    var cutShort: CutShort? = null
-    val messages = queryList(
-        "SELECT locations, reason FROM linx_modifications WHERE uid = ? AND start_date = ? AND code IN ('06', '93', '95') AND locations IS NOT NULL ORDER BY id",
-        listOf(uid, svcDate)
-    ) { it.getString(1) to it.getString(2) }
-    for ((message, reason) in messages) {
-        val entries = message.split(';').map { it.split('|') }.filter { it.size >= 2 && it[0].isNotEmpty() }
-        fun marked(indicator: String) = entries.filter { it[1] == indicator }.map { it[0] }
-        marked("03").zip(marked("04")).forEach { (from, to) -> replaced[from] = to }
-        marked("95").firstOrNull()?.let { from ->
-            startMovedFrom = from
-            startMovedTo = marked("04").firstOrNull()
-            startMovedReason = ReasonCodes.resolve(reason)
-        }
-        val cutFrom = marked("93").firstOrNull()
-        val end = entries.firstOrNull { it[1] == "04" }
-        if (cutFrom != null && end != null) {
-            cutShort = CutShort(cutFrom, end[0], end.getOrNull(3)?.take(5) ?: "", ReasonCodes.resolve(reason))
-        }
-    }
-    val movedOrigin = startMovedFrom?.let { from -> startMovedTo ?: replaced[from] }
-    return LocationChanges(replaced, movedOrigin, startMovedReason.takeIf { movedOrigin != null }, cutShort)
 }
 
 /**

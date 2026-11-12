@@ -223,15 +223,30 @@ object RoutePoints {
         val hi = (cps.getOrNull(b)?.actualTime?.let(::secs) ?: (at + 600)) + 59
         if (lo > at || hi < at) return cps   // across midnight: leave as booked
 
+        val stanoxOf = stanoxesFor(cps.map { it.tiploc })
+        // Areas this schedule runs through, every booked stop (pass points included). region() is the first two
+        // STANOX digits, so signal boxes within an area share a region and a multi-area route has all of them.
+        val allowedRegions = cps.mapNotNull { stanoxOf[it.tiploc] }.mapNotNull { region(it) }.toSet()
+
+        // td_events is keyed by headcode only, and headcodes are reused (a second 1K70 ran in Norfolk). As the
+        // older merge() did, drop STANOXes that belong to another uid activated under this headcode on this date.
+        val reqDate = LocalDate.parse(svcDate)
+        val onDay = activationDays(hc, setOf(reqDate))[reqDate] ?: emptySet()
+        val otherUidStanoxes = onDay.filter { it != clean(uid) }.flatMap { stanoxesOfUid(it) }.toSet()
+
         // Where the train was seen in the stretch: TD berth steps and LINX reports, earliest per STANOX.
         val seen = HashMap<String, Long>()
         fun see(stanox: String?, s: Long?) {
             if (stanox.isNullOrEmpty() || s == null || s < lo || s > hi) return
             if (s < (seen[stanox] ?: Long.MAX_VALUE)) seen[stanox] = s
         }
+        val tdPairs = ArrayList<Pair<String, Long>>()
         transaction {
             query("SELECT stanox, MIN(event_s) FROM td_events WHERE headcode = ? AND event_s BETWEEN $lo AND $hi GROUP BY stanox", listOf(hc)) { rs ->
-                while (rs.next()) see(rs.getString(1), rs.getLong(2))
+                while (rs.next()) {
+                    val sx = rs.getString(1) ?: continue
+                    tdPairs.add(sx to rs.getLong(2))
+                }
             }
             query(
                 "SELECT stanox, actual_time FROM movements WHERE uid = ? AND actual_time IS NOT NULL AND event_ts >= ? AND event_ts < ?",
@@ -240,7 +255,12 @@ object RoutePoints {
                 while (rs.next()) see(rs.getString(1), secs(rs.getString(2)))
             }
         }
-        val stanoxOf = stanoxesFor(cps.map { it.tiploc })
+        // Keep TD points in an area this schedule runs through and not owned by another uid sharing the headcode.
+        // If none are in-region, the stretch went off-route (a genuine diversion), so keep what wasn't excluded
+        // rather than lose the real path.
+        val tdNotOther = tdPairs.filter { (sx, _) -> sx !in otherUidStanoxes }
+        val tdInRegion = tdNotOther.filter { (sx, _) -> region(sx) in allowedRegions }
+        for ((sx, s) in tdInRegion.ifEmpty { tdNotOther }) see(sx, s)
         fun hm(s: Long) = Instant.ofEpochSecond(s).atZone(LONDON).format(HM)
         fun hms(s: Long) = Instant.ofEpochSecond(s).atZone(LONDON).format(HMS)
 

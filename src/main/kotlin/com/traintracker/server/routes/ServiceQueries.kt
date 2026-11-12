@@ -70,14 +70,18 @@ internal class OriginDestOverrides(
     private val overlayDest: Map<String, Pair<String, String?>>,
     private val overlayOrigin: Map<String, Pair<String, String?>>,
     private val activationOrigin: Map<String, String>,
+    private val linxOrigin: Map<String, String>,
+    private val linxDestination: Map<String, String>,
 ) {
     /** (TIPLOC, CRS) of the origin for a schedule row. */
     fun origin(row: ResultRow): Pair<String, String?> {
         val uid = row[Schedules.uid]
+        val linx = linxOrigin[uid]
         val overlay = overlayOrigin[uid]
         val activated = activationOrigin[uid]
-        val tiploc = overlay?.first ?: activated ?: row[Schedules.originTiploc]
+        val tiploc = linx ?: overlay?.first ?: activated ?: row[Schedules.originTiploc]
         val crs = when {
+            linx != null -> CorpusLookup.crsFromTiploc(linx)
             overlay != null -> overlay.second ?: CorpusLookup.crsFromTiploc(overlay.first)
             activated != null -> CorpusLookup.crsFromTiploc(activated)
             else -> row[Schedules.originCrs]?.takeIf { it.isNotEmpty() } ?: CorpusLookup.crsFromTiploc(row[Schedules.originTiploc])
@@ -87,17 +91,21 @@ internal class OriginDestOverrides(
 
     /** (TIPLOC, CRS) of the destination for a schedule row. */
     fun dest(row: ResultRow): Pair<String, String?> {
+        val linx = linxDestination[row[Schedules.uid]]
         val overlay = overlayDest[row[Schedules.uid]]
-        val tiploc = overlay?.first ?: row[Schedules.destTiploc]
-        val crs = overlay?.second
-            ?: row[Schedules.destCrs]?.takeIf { it.isNotEmpty() }
-            ?: CorpusLookup.crsFromTiploc(row[Schedules.destTiploc])
+        val tiploc = linx ?: overlay?.first ?: row[Schedules.destTiploc]
+        val crs = if (linx != null) CorpusLookup.crsFromTiploc(linx) else {
+            overlay?.second
+                ?: row[Schedules.destCrs]?.takeIf { it.isNotEmpty() }
+                ?: CorpusLookup.crsFromTiploc(row[Schedules.destTiploc])
+        }
         return tiploc to crs
     }
 }
 
 internal fun JdbcTransaction.originDestOverrides(uids: Collection<String>, date: String): OriginDestOverrides {
-    if (uids.isEmpty()) return OriginDestOverrides(emptyMap(), emptyMap(), emptyMap())
+    if (uids.isEmpty()) return OriginDestOverrides(emptyMap(), emptyMap(), emptyMap(), emptyMap(), emptyMap())
+    val linxChanges = locationChanges(uids, date)
     val overlayDest = mutableMapOf<String, Pair<String, String?>>()
     val overlayOrigin = mutableMapOf<String, Pair<String, String?>>()
     Schedules.selectAll().where {
@@ -119,7 +127,13 @@ internal fun JdbcTransaction.originDestOverrides(uids: Collection<String>, date:
         } ?: return@forEach
         activationOrigin[uid] = tiploc
     }
-    return OriginDestOverrides(overlayDest, overlayOrigin, activationOrigin)
+    return OriginDestOverrides(
+        overlayDest,
+        overlayOrigin,
+        activationOrigin,
+        linxChanges.mapNotNull { (uid, change) -> change.movedOrigin?.let { uid to it } }.toMap(),
+        linxChanges.mapNotNull { (uid, change) -> change.cutShort?.to?.let { uid to it } }.toMap()
+    )
 }
 
 // ---- Enrichment ----------------------------------------------------------------------------------------
@@ -200,8 +214,8 @@ private fun searchResults(bestRows: List<ResultRow>, date: String): List<Service
     }
     val overrides = originDestOverrides(uids, date)
     val ctx = buildAssociationContext(uids)
-    val darwinDb = AppDatabase.darwinPlatforms(uids)
-    val movementPlatforms = AppDatabase.movementPlatforms(uids)
+    val darwinDb = AppDatabase.darwinPlatforms(uids, date)
+    val movementPlatforms = AppDatabase.movementPlatforms(uids, date)
     bestRows.sortedBy { it[Schedules.scheduledTime] }.map { row ->
         val scht = row[Schedules.scheduledTime]
         val uid = row[Schedules.uid]

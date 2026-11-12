@@ -371,8 +371,8 @@ private fun JdbcTransaction.boardServices(
         }
     }
     val overrides = originDestOverrides(uids, date)
-    val darwinDb = AppDatabase.darwinPlatforms(uids)
-    val movementPlatforms = AppDatabase.movementPlatforms(uids)
+    val darwinDb = AppDatabase.darwinPlatforms(uids, date)
+    val movementPlatforms = AppDatabase.movementPlatforms(uids, date)
     val activatedUids = AppDatabase.activatedUids(uids, date)
     val services = rows.mapNotNull { row ->
         val uid = row[Schedules.uid]
