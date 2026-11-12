@@ -6,6 +6,17 @@
 dir=/srv/rdm/in
 mins=$((8*1440))
 cd "$dir" || exit 1
+
+# SMART berth steps are a full snapshot each time, so keep only the newest file (by the timestamp in its
+# name), once it has settled: not touched for 10 minutes and not empty. No 8-day wait for this type.
+newest=$(ls -- berth-steps-*.csv 2>/dev/null | sort | tail -n1)
+if [ -n "$newest" ] && [ -s "$newest" ] && [ -z "$(find . -maxdepth 1 -name "$newest" -mmin -10)" ]; then
+  for f in berth-steps-*.csv; do
+    [ "$f" = "$newest" ] && continue
+    echo "$(date '+%F %T') deleting $f (older berth-steps)"
+    [ -z "$DRY" ] && rm -f -- "$f"
+  done
+fi
 key() {
   case "$1" in
     PIF*) printf 'PIF-%s' "$(zcat -f -- "$1" 2>/dev/null | head -n1 | cut -f5,6 | tr -d ' \t')" ;;
