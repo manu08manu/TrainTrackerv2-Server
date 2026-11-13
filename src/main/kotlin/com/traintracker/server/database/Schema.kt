@@ -11,6 +11,11 @@ object Schema {
 
     const val MASTER_ADMIN_BOOTSTRAP_EMAIL = "tannajaisal@gmail.com"
 
+    private const val NR_HEADCODE_EXPRESSION =
+        "CASE WHEN headcode GLOB '[A-Z][1-9][0-9][0-9]' " +
+        "THEN substr(headcode,2,1) || substr(headcode,1,1) || substr(headcode,3) " +
+        "ELSE headcode END"
+
     private val exposedTables = arrayOf(
         SavedMaps, Schedules, Movements, TrainLocations, CifMeta, AllocationConsists, AllocationLegs,
         HeadcodeAliases, AllocationHistory, AllocationChanges, CifAssociations, DarwinPlatforms,
@@ -26,6 +31,10 @@ object Schema {
         "CREATE TABLE IF NOT EXISTS tiploc_crs_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, tiploc TEXT NOT NULL, old_crs TEXT, new_crs TEXT NOT NULL, changed_by TEXT NOT NULL, changed_at TEXT DEFAULT (datetime('now')))",
         // Manual overrides
         "CREATE TABLE IF NOT EXISTS location_overrides (name TEXT, crs TEXT, tiploc TEXT PRIMARY KEY, stanox TEXT, changed_by TEXT, changed_at TEXT)",
+        "CREATE INDEX IF NOT EXISTS idx_location_overrides_stanox ON location_overrides(stanox)",
+        // A STANOX shorter than five digits is zero-padded, on insert and when it is changed.
+        "CREATE TRIGGER IF NOT EXISTS lo_stanox_pad_i AFTER INSERT ON location_overrides WHEN NEW.stanox GLOB '[0-9]*' AND length(NEW.stanox)<5 BEGIN UPDATE location_overrides SET stanox=printf('%05d',NEW.stanox) WHERE rowid=NEW.rowid; END",
+        "CREATE TRIGGER IF NOT EXISTS lo_stanox_pad_u AFTER UPDATE OF stanox ON location_overrides WHEN NEW.stanox GLOB '[0-9]*' AND length(NEW.stanox)<5 BEGIN UPDATE location_overrides SET stanox=printf('%05d',NEW.stanox) WHERE rowid=NEW.rowid; END",
         "CREATE TABLE IF NOT EXISTS tsc_operator_overrides (tsc TEXT PRIMARY KEY, operator TEXT NOT NULL, changed_by TEXT NOT NULL, changed_at TEXT DEFAULT (datetime('now')))",
         "CREATE TABLE IF NOT EXISTS operators (code TEXT PRIMARY KEY, name TEXT NOT NULL, colour TEXT DEFAULT NULL)",
         // Admin work queues
@@ -34,8 +43,9 @@ object Schema {
         "CREATE TABLE IF NOT EXISTS missing_smart_stanox (stanox TEXT PRIMARY KEY, first_seen TEXT DEFAULT (datetime('now')), last_seen TEXT DEFAULT (datetime('now')), seen_count INTEGER DEFAULT 1, headcode TEXT DEFAULT '', uid TEXT DEFAULT '')",
         "CREATE TABLE IF NOT EXISTS feedback (id INTEGER PRIMARY KEY AUTOINCREMENT, message TEXT NOT NULL, page TEXT DEFAULT '', submitted_at TEXT DEFAULT (datetime('now')), dismissed_at TEXT)",
         // Train describer events
-        "CREATE TABLE IF NOT EXISTS td_events (headcode TEXT NOT NULL, stanox TEXT NOT NULL, event_type TEXT NOT NULL, event_s INTEGER NOT NULL, PRIMARY KEY (headcode, stanox, event_type, event_s)) WITHOUT ROWID",
+        "CREATE TABLE IF NOT EXISTS td_events (headcode TEXT NOT NULL, stanox TEXT NOT NULL, event_type TEXT NOT NULL, event_s INTEGER NOT NULL, nr_headcode TEXT GENERATED ALWAYS AS ($NR_HEADCODE_EXPRESSION) VIRTUAL, PRIMARY KEY (headcode, stanox, event_type, event_s)) WITHOUT ROWID",
         "CREATE INDEX IF NOT EXISTS idx_td_events_s ON td_events(event_s)",
+        "CREATE INDEX IF NOT EXISTS idx_td_events_stanox ON td_events(stanox)",
         // CIF cancellation windows (STP 'C' schedules)
         "CREATE TABLE IF NOT EXISTS cif_cancellations (uid TEXT NOT NULL, start_date TEXT NOT NULL, end_date TEXT NOT NULL, days TEXT NOT NULL, PRIMARY KEY (uid, start_date, end_date, days)) WITHOUT ROWID",
         // RDM location reference files
@@ -83,6 +93,8 @@ object Schema {
             rawTables.forEach { exec(it) }
             addMasterAdminColumn()
             addTdPlatformColumn()
+            addScheduleWttColumns()
+            addTdNrHeadcodeColumn()
             addLinxModificationColumns()
         }
     }
@@ -93,6 +105,31 @@ object Schema {
         if ("platform" in columns) return
         exec("ALTER TABLE td_events ADD COLUMN platform TEXT")
         log.info("Migrated td_events.platform column")
+    }
+
+    /** schedules gained wtt_arrival and wtt_departure (working-timetable minutes, for LINX/TD matching only). */
+    private fun JdbcTransaction.addScheduleWttColumns() {
+        val columns = queryList("PRAGMA table_info(schedules)") { it.getString(2) }
+        if (columns.isEmpty()) return
+        for (column in listOf("wtt_arrival", "wtt_departure")) {
+            if (column in columns) continue
+            exec("ALTER TABLE schedules ADD COLUMN $column VARCHAR(5)")
+            log.info("Migrated schedules.$column column")
+        }
+    }
+
+    /** td_events gains a normalised NR-style headcode for matching LU descriptors. */
+    private fun JdbcTransaction.addTdNrHeadcodeColumn() {
+        // table_info omits generated columns; table_xinfo includes them.
+        val columns = queryList("PRAGMA table_xinfo(td_events)") { it.getString(2) }
+
+        if ("nr_headcode" !in columns) {
+            exec("""ALTER TABLE td_events ADD COLUMN nr_headcode TEXT
+            GENERATED ALWAYS AS ($NR_HEADCODE_EXPRESSION) VIRTUAL""")
+            log.info("Migrated td_events.nr_headcode column")
+        }
+
+        exec("CREATE INDEX IF NOT EXISTS idx_td_events_nrhc ON td_events(nr_headcode, stanox, event_s)")
     }
 
     /**

@@ -50,7 +50,9 @@ object TdConsumer {
         }
 
     private fun isHeadcode(d: String): Boolean =
-        d.length == 4 && d[0].isDigit() && d[1].isLetter() && d[2].isDigit() && d[3].isDigit()
+        d.length == 4 &&
+        ((d[0].isDigit() && d[1].isLetter() && d[2].isDigit() && d[3].isDigit()) ||
+         (d[0] in 'A'..'Z' && d[1] in '1'..'9' && d[2].isDigit() && d[3].isDigit()))
 
     private fun areaNote(area: String) = if (SmartLookup.hasArea(area)) " (area in SMART)" else " (area NOT in SMART)"
 
