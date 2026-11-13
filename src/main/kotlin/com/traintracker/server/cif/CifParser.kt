@@ -1,23 +1,16 @@
 package com.traintracker.server.cif
 
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+
 import com.traintracker.server.Config
 import com.traintracker.server.database.AppDatabase
 import com.traintracker.server.database.AssociationRecord
 import com.traintracker.server.database.Schedules
-import io.ktor.client.HttpClient
-import io.ktor.client.engine.cio.CIO
-import io.ktor.client.plugins.HttpRedirect
-import io.ktor.client.request.get
-import io.ktor.client.request.header
-import io.ktor.client.statement.bodyAsChannel
-import io.ktor.http.isSuccess
-import io.ktor.utils.io.readAvailable
 import java.io.File
 import java.io.FileInputStream
-import java.io.FileOutputStream
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
-import java.util.Base64
 import java.util.zip.GZIPInputStream
 import org.jetbrains.exposed.v1.jdbc.batchInsert
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
@@ -313,44 +306,55 @@ object CifParser {
     }
 }
 
-/** Downloads the full CIF once a day and reloads the timetable from it. */
-object CifDownloader {
-    private val http = HttpClient(CIO) {
-        install(HttpRedirect) { checkHttpMethod = false }
-        engine { requestTimeout = 0L }
-    }
-
-    suspend fun downloadIfNeeded() {
-        val today = LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE)
-        if (AppDatabase.getCifMeta("last_download_date") == today) {
-            log.info("CIF up to date (last download: $today)")
-            return
+/** Imports the daily RDM full CIF JSON into the schedules table. */
+object ScheduleImporter {
+    /** Returns true when the import could not run yet and the caller should retry soon. */
+    fun importIfNeeded(): Boolean {
+        val source = File(Config.cifSourcePath)
+        if (!source.exists()) {
+            log.warn("CIF source missing: ${source.path} — skipping import")
+            return true
         }
-        log.info("Downloading CIF schedule for $today…")
-        download()
-        AppDatabase.setCifMeta("last_download_date", today)
-    }
+        val sourceMtime = source.lastModified()
+        val ageMs = System.currentTimeMillis() - sourceMtime
+        if (ageMs < 5 * 60_000) {
+            log.info("CIF source modified <5 min ago — waiting")
+            return true
+        }
+        if (ageMs > 36 * 3_600_000L) {
+            log.warn("CIF source is ${ageMs / 3_600_000}h old — RDM feed may have stopped")
+        }
+        val lastImported = AppDatabase.getCifMeta("cif_source_mtime")?.toLongOrNull() ?: 0L
+        if (sourceMtime == lastImported) {
+            log.info("CIF source unchanged (mtime=$sourceMtime) — skipping import")
+            return false
+        }
+        log.info("CIF import starting from ${source.path} (${source.length() / 1024 / 1024}MB)")
 
-    private suspend fun download() {
-        val auth = Base64.getEncoder().encodeToString("${Config.scheduleUsername}:${Config.schedulePassword}".toByteArray())
-        val response = http.get(Config.scheduleUrl) { header("Authorization", "Basic $auth") }
-        if (!response.status.isSuccess()) error("CIF download failed: HTTP ${response.status}")
-        val file = Config.CIF_CACHE
-        val channel = response.bodyAsChannel()
-        runCatching {
-            FileOutputStream(file).buffered().use { out ->
-                val buf = ByteArray(65536)
-                while (true) {
-                    val n = channel.readAvailable(buf)
-                    if (n == -1) break
-                    if (n > 0) out.write(buf, 0, n)
-                }
+        // Copy → verify → atomically replace the cache. If anything fails, CIF_CACHE
+        // still holds the previous full file, so the schedule table is never touched.
+        val tmp = File(Config.CIF_CACHE.path + ".tmp")
+        try {
+            source.copyTo(tmp, overwrite = true)
+            if (source.lastModified() != sourceMtime) {
+                tmp.delete()
+                log.warn("CIF source changed during copy — retrying shortly")
+                return true
             }
-        }.onFailure { error("CIF download failed while streaming to disk: ${it.message}") }
-        log.info("CIF downloaded ${file.length() / 1024 / 1024}MB — parsing and inserting…")
+            GZIPInputStream(FileInputStream(tmp)).use { it.copyTo(java.io.OutputStream.nullOutputStream()) }
+            Files.move(tmp.toPath(), Config.CIF_CACHE.toPath(), StandardCopyOption.REPLACE_EXISTING)
+        } catch (e: Exception) {
+            tmp.delete()
+            log.error("CIF copy/verify failed (source=${source.path}): ${e.message}", e)
+            return true
+        }
+
         // VSTP ('N') schedules come from Kafka and survive the reload.
         transaction { exec("DELETE FROM schedules WHERE stp_indicator != 'N'") }
-        val count = CifParser.parseAndPersist(file)
+        val count = CifParser.parseAndPersist(Config.CIF_CACHE)
+        AppDatabase.setCifMeta("cif_source_mtime", sourceMtime.toString())
+        AppDatabase.setCifMeta("last_download_date", LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE))
         log.info("CIF import complete — $count stops inserted")
+        return false
     }
 }
