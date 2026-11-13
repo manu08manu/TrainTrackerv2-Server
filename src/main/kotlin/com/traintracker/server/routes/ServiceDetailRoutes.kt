@@ -217,6 +217,8 @@ private fun JdbcTransaction.serviceRoute(uid: String, atCrs: String, svcDate: St
         val scht = row[Schedules.scheduledTime]
         val schedArr = row[Schedules.scheduledArrival]
         val schedDep = row[Schedules.scheduledDeparture]
+        val wttArr = row.getOrNull(Schedules.wttArrival)
+        val wttDep = row.getOrNull(Schedules.wttDeparture)
         val exactMove = moves.latest[scht] ?: crs?.let { moves.latest["$it|$scht"] }
         // No exact report with a time (or only a cancellation): the nearest report here (arrival at the
         // terminus, departure elsewhere).
@@ -242,10 +244,10 @@ private fun JdbcTransaction.serviceRoute(uid: String, atCrs: String, svcDate: St
             row[Schedules.isPass],
             row[Schedules.stopType],
             exactMove?.first?.ifEmpty { null } ?: near?.actual ?: "",
-            moves.arrivals.at(schedArr, crs) ?: nearArr?.actual ?: "",
-            moves.departures.at(schedDep, crs) ?: moves.departures.at(scht, crs) ?: nearDep?.actual ?: "",
-            moves.arrivalSecs.at(schedArr, crs) ?: nearArr?.actualSec ?: "",
-            moves.departureSecs.at(schedDep, crs) ?: moves.departureSecs.at(scht, crs) ?: nearDep?.actualSec ?: "",
+            moves.arrivals.at(wttArr, crs) ?: moves.arrivals.at(schedArr, crs) ?: nearArr?.actual ?: "",
+            moves.departures.at(wttDep, crs) ?: moves.departures.at(schedDep, crs) ?: moves.departures.at(scht, crs) ?: nearDep?.actual ?: "",
+            moves.arrivalSecs.at(wttArr, crs) ?: moves.arrivalSecs.at(schedArr, crs) ?: nearArr?.actualSec ?: "",
+            moves.departureSecs.at(wttDep, crs) ?: moves.departureSecs.at(schedDep, crs) ?: moves.departureSecs.at(scht, crs) ?: nearDep?.actualSec ?: "",
             (exactMove?.second ?: false) || ttCancelled,
             exactMove?.third ?: if (ttCancelled) TIMETABLE_CANCELLED else null,
             replaces = if (tiploc != booked) tiplocNames[booked] ?: booked else null,

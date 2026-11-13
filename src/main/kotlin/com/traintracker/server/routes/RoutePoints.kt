@@ -97,7 +97,7 @@ object RoutePoints {
                 transaction {
                     val sx = cleanList(stanoxes)
                     query(
-                        "SELECT stanox, MIN(event_s) FROM td_events WHERE headcode=? AND event_s >= $lo AND event_s <= $hi AND stanox IN (${placeholders(sx.size)}) GROUP BY stanox",
+                        "SELECT stanox, MIN(event_s) FROM td_events WHERE nr_headcode=? AND event_s >= $lo AND event_s <= $hi AND stanox IN (${placeholders(sx.size)}) GROUP BY stanox",
                         listOf(hc) + sx
                     ) { rs ->
                         while (rs.next()) {
@@ -242,7 +242,7 @@ object RoutePoints {
         }
         val tdPairs = ArrayList<Pair<String, Long>>()
         transaction {
-            query("SELECT stanox, MIN(event_s) FROM td_events WHERE headcode = ? AND event_s BETWEEN $lo AND $hi GROUP BY stanox", listOf(hc)) { rs ->
+            query("SELECT stanox, MIN(event_s) FROM td_events WHERE nr_headcode = ? AND event_s BETWEEN $lo AND $hi GROUP BY stanox", listOf(hc)) { rs ->
                 while (rs.next()) {
                     val sx = rs.getString(1) ?: continue
                     tdPairs.add(sx to rs.getLong(2))
@@ -336,7 +336,7 @@ object RoutePoints {
         val from = Instant.now().epochSecond - HISTORY_DAYS * 86400L
         val evs = ArrayList<Ev>()
         transaction {
-            query("SELECT stanox, event_s FROM td_events WHERE headcode=? AND event_s >= $from", listOf(hc)) { rs ->
+            query("SELECT stanox, event_s FROM td_events WHERE nr_headcode=? AND event_s >= $from", listOf(hc)) { rs ->
                 while (rs.next()) {
                     val sx = rs.getString(1)
                     if (sx != null) evs.add(Ev(sx, rs.getLong(2)))

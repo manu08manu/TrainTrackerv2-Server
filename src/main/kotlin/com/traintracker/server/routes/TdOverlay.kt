@@ -48,7 +48,7 @@ class TdOverlay private constructor(private val byKey: Map<String, List<Long>>) 
                 val to = day.plusHours(36).toEpochSecond()
                 val map = HashMap<String, MutableList<Long>>()
                 transaction {
-                    query("SELECT stanox, event_type, event_s FROM td_events WHERE headcode=? AND event_s >= $from AND event_s < $to", listOf(hc)) { rs ->
+                    query("SELECT stanox, event_type, event_s FROM td_events WHERE nr_headcode=? AND event_s >= $from AND event_s < $to", listOf(hc)) { rs ->
                         while (rs.next()) {
                             val t = if (rs.getString(2) == "A") "ARRIVAL" else "DEPARTURE"
                             map.getOrPut("${rs.getString(1)}|$t") { ArrayList() }.add(rs.getLong(3))

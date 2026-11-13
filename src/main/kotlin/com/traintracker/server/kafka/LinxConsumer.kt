@@ -215,7 +215,7 @@ object LinxConsumer {
                     var best: Pair<Long, String>? = null
                     if (r.stanox != null && r.actualS != null) {
                         query(
-                            "SELECT event_s, platform FROM td_events WHERE headcode = ? AND stanox = ? AND event_type = ? AND event_s BETWEEN ? AND ? AND platform IS NOT NULL AND platform != ''",
+                            "SELECT event_s, platform FROM td_events WHERE nr_headcode = ? AND stanox = ? AND event_type = ? AND event_s BETWEEN ? AND ? AND platform IS NOT NULL AND platform != ''",
                             listOf(r.headcode, r.stanox, r.tdType, (r.actualS - 180).toString(), (r.actualS + 180).toString())
                         ) { rs ->
                             while (rs.next()) {

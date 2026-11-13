@@ -47,7 +47,9 @@ data class CifStop(
     val scheduleStartDate: String = "",
     val scheduleEndDate: String = "",
     val sequence: Int = 0,
-    val daysRun: String = "1111111"
+    val daysRun: String = "1111111",
+    val wttArrival: String? = null,
+    val wttDeparture: String? = null
 )
 
 /** Inserts stops into schedules; call inside a transaction. */
@@ -62,6 +64,8 @@ fun insertStops(stops: List<CifStop>, scheduleDate: (CifStop) -> String) {
         this[Schedules.scheduledTime] = s.scheduledTime
         this[Schedules.scheduledArrival] = s.scheduledArrival
         this[Schedules.scheduledDeparture] = s.scheduledDeparture
+        this[Schedules.wttArrival] = s.wttArrival
+        this[Schedules.wttDeparture] = s.wttDeparture
         this[Schedules.platform] = s.platform
         this[Schedules.isPass] = s.isPass
         this[Schedules.stopType] = s.stopType
@@ -194,6 +198,8 @@ object CifParser {
                 scheduleEndDate = validToStr,
                 sequence = i,
                 daysRun = daysRun,
+                wttArrival = formatHHMM(loc.wttArr).ifEmpty { null },
+                wttDeparture = formatHHMM(loc.wttDep).ifEmpty { null },
             )
         }
     }

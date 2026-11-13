@@ -15,6 +15,9 @@ object Schedules : Table("schedules") {
     val scheduledTime = varchar("scheduled_time", 5)
     val scheduledArrival = varchar("scheduled_arrival", 5).nullable()
     val scheduledDeparture = varchar("scheduled_departure", 5).nullable()
+    /** Working-timetable arrival minute, for matching LINX/TD only; the API keeps showing public times. */
+    val wttArrival = varchar("wtt_arrival", 5).nullable()
+    val wttDeparture = varchar("wtt_departure", 5).nullable()
     val platform = varchar("platform", 3).nullable()
     val isPass = bool("is_pass")
     val stopType = varchar("stop_type", 2)
