@@ -1,6 +1,6 @@
 package com.traintracker.server
 
-import com.traintracker.server.cif.CifDownloader
+import com.traintracker.server.cif.ScheduleImporter
 import com.traintracker.server.cif.CorpusLookup
 import com.traintracker.server.cif.LocationData
 import com.traintracker.server.cif.SmartLookup
@@ -109,9 +109,9 @@ private fun Application.configure() {
 private suspend fun startBackgroundWork(scope: CoroutineScope) {
     log.info("TrainTracker backend starting…")
     try {
-        CifDownloader.downloadIfNeeded()
+        ScheduleImporter.importIfNeeded()
     } catch (e: Exception) {
-        log.error("CIF download failed on startup: ${e.message}")
+        log.error("CIF import failed on startup: ${e.message}")
     }
     restoreSavedState()
     LinxConsumer.start(scope)
@@ -129,7 +129,9 @@ private suspend fun startBackgroundWork(scope: CoroutineScope) {
             delay(millisUntil(nextTimeOfDay(3, 15)))
             try {
                 log.info("Nightly CIF refresh starting…")
-                CifDownloader.downloadIfNeeded()
+                // Source still settling, changed mid-copy or missing: retry every 10 min for up to 2 h.
+                var attempts = 0
+                while (ScheduleImporter.importIfNeeded() && ++attempts < 12) delay(10 * 60_000L)
             } catch (e: Exception) {
                 log.error("Nightly CIF refresh failed: ${e.message}")
             }
@@ -181,7 +183,7 @@ private fun restoreSavedState() {
         CorpusLookup.mergeStanoxFromFeed(stanoxMap)
         log.info("Stanox map reloaded from DB: ${stanoxMap.size} entries")
     } else {
-        log.warn("Stanox map empty — delays may not show until next CIF download")
+        log.warn("Stanox map empty — delays may not show until next CIF import")
     }
     val stanoxTiplocMap = AppDatabase.loadStanoxTiplocMap()
     if (stanoxTiplocMap.isNotEmpty()) {

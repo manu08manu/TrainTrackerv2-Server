@@ -15,6 +15,10 @@ object Config {
     /** The nightly full CIF download. */
     val CIF_CACHE: File = File(DATA_DIR, "cif_cache.gz")
 
+    /** Local RDM feed - the daily full CIF JSON gzip. Override with CIF_SOURCE_PATH if needed. */
+    val cifSourcePath: String =
+        System.getenv("CIF_SOURCE_PATH") ?: "/srv/rdm/in/CIF_ALL_FULL_DAILY_toc-full.json.gz"
+
     val port: Int = System.getenv("PORT")?.toIntOrNull() ?: 8080
 
     val kafkaBootstrap: String = env("KAFKA_BOOTSTRAP")
@@ -27,9 +31,6 @@ object Config {
     /** NWR LINX EI: the source of train activations, movements, cancellations and changes of origin. */
     val kafkaGroupIdLinx: String = env("KAFKA_GROUP_ID_LINX")
 
-    val scheduleUrl: String = env("SCHEDULE_URL")
-    val scheduleUsername: String = env("SCHEDULE_USERNAME")
-    val schedulePassword: String = env("SCHEDULE_PASSWORD")
 
     val sqlitePath: String = System.getenv("SQLITE_PATH") ?: "./traintracker.db"
 

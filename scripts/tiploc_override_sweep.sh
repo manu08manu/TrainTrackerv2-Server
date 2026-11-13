@@ -11,15 +11,8 @@ GRACE_DAYS=30
 
 mkdir -p "$(dirname "$REPORT")"
 
-if [ -f "$CACHE" ] && [ "$(date -r "$CACHE" +%Y%m%d)" = "$(date +%Y%m%d)" ]; then
-    cp "$CACHE" "$F"
-    echo "$(date '+%F %T') using app's same-day CIF cache" >> "$REPORT"
-else
-    source <(grep -E '^SCHEDULE_(USERNAME|PASSWORD)' /opt/traintracker/env.conf)
-
-    curl -sL -u "$SCHEDULE_USERNAME:$SCHEDULE_PASSWORD" -o "$F" \
-        'https://publicdatafeeds.networkrail.co.uk/ntrod/CifFileAuthenticate?type=CIF_ALL_FULL_DAILY&day=toc-full'
-fi
+source "$(dirname "$0")/cif_cache.sh"
+download_cif_to "$CACHE" "$F" "$REPORT"
 
 if [ ! -f "$F" ] || [ "$(stat -c%s "$F")" -lt 1000000 ]; then
     echo "$(date '+%F %T') download failed / cache missing - sweep skipped" >> "$REPORT"

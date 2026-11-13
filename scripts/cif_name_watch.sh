@@ -11,15 +11,8 @@ REPORT=~/traintracker-backend/logs/cif_name_changes.log
 F=/tmp/cif_watch_daily.gz
 
 CACHE=/opt/traintracker/cif_cache.gz
-if [ -f "$CACHE" ] && [ "$(date -r "$CACHE" +%Y%m%d)" = "$(date +%Y%m%d)" ]; then
-    cp "$CACHE" "$F"
-    echo "$(date '+%F %T') using app's same-day CIF cache" >> "$REPORT"
-else
-    # env.conf is owned by opc - no sudo needed
-    source <(grep -E '^SCHEDULE_(USERNAME|PASSWORD)' /opt/traintracker/env.conf)
-    curl -sL -u "$SCHEDULE_USERNAME:$SCHEDULE_PASSWORD" -o "$F" \
-      'https://publicdatafeeds.networkrail.co.uk/ntrod/CifFileAuthenticate?type=CIF_ALL_FULL_DAILY&day=toc-full'
-fi
+source "$(dirname "$0")/cif_cache.sh"
+download_cif_to "$CACHE" "$F" "$REPORT" || exit 1
 [ "$(stat -c%s "$F")" -lt 1000000 ] && { echo "$(date '+%F %T') download failed" >> "$REPORT"; rm -f "$F"; exit 1; }
 
 python3 - "$WEEK_AGO" "$SNAP" "$REPORT" "$F" << 'PY'
