@@ -402,28 +402,19 @@ private fun JdbcTransaction.boardServices(
         )
         val (originTiploc, originCrs) = overrides.origin(row)
         val (destTiploc, destCrs) = overrides.dest(row)
-        ServiceResponse(
-            uid = uid,
-            headcode = row[Schedules.headcode],
-            atocCode = CorpusLookup.operatorForTsc(row[Schedules.tsc]),
-            scheduledTime = scht,
-            scheduledArrival = row[Schedules.scheduledArrival],
-            scheduledDeparture = row[Schedules.scheduledDeparture],
+        scheduledServiceResponse(
+            row = row,
             platform = platform,
             platformConfirmed = confirmed,
-            isPass = row[Schedules.isPass],
-            stopType = row[Schedules.stopType],
-            originTiploc = originTiploc,
-            destTiploc = destTiploc,
-            originCrs = originCrs,
-            destCrs = destCrs,
+            origin = originTiploc to originCrs,
+            destination = destTiploc to destCrs,
             actualTime = if (predicted) clockTime(scht.toMinutes() + delay) else actualTime,
             isCancelled = isCancelled,
             cancelReason = cancelEntry?.third ?: if (timetableCancelled) TIMETABLE_CANCELLED else null,
             isPredicted = predicted,
             isRunning = uid in running,
             link = "/?service=$uid&crs=$safeCrs&date=$date",
-            serviceDate = date
+            serviceDate = date,
         )
     }.withResolvedNames()
     // Order by the time shown: scheduled when cancelled, else actual or predicted.
