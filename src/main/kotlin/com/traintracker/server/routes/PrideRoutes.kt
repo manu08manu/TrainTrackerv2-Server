@@ -10,11 +10,11 @@ import io.ktor.server.routing.Route
 import io.ktor.server.routing.get
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import java.io.File
 import java.nio.file.Files
@@ -29,13 +29,8 @@ fun Route.prideRoutes() {
     get("/pride") {
         val f = File(PRIDE_FILE)
         val text = if (f.exists()) f.readText() else "{}"
-        val ok = try {
-            Json.parseToJsonElement(text)
-            true
-        } catch (e: Exception) {
-            false
-        }
-        if (ok) {
+        val validJson = parseJson(text) != null
+        if (validJson) {
             call.respondText(text, ContentType.Application.Json)
         } else {
             call.respondText(
@@ -46,11 +41,8 @@ fun Route.prideRoutes() {
         }
     }
     adminPut("/admin/pride") {
-        val root = try {
-            Json.parseToJsonElement(receiveText()).jsonObject
-        } catch (e: Exception) {
-            return@adminPut badRequest("body must be a JSON object")
-        }
+        val root = parseJson(receiveText()) as? JsonObject
+            ?: return@adminPut badRequest("body must be a JSON object")
         validationError(root)?.let { return@adminPut badRequest(it) }
         try {
             val f = File(PRIDE_FILE)
@@ -67,6 +59,13 @@ fun Route.prideRoutes() {
         }
     }
 }
+
+private fun parseJson(text: String): JsonElement? =
+    try {
+        Json.parseToJsonElement(text)
+    } catch (e: Exception) {
+        null
+    }
 
 /** Every operator must map to an array of objects whose "unit" is a 5 or 6 digit number. */
 private fun validationError(root: JsonObject): String? {

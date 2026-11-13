@@ -40,12 +40,49 @@ private fun bestOriginRows(rows: List<ResultRow>): List<ResultRow> = rows.groupB
     group.filter { stpRank(it) == best }.minByOrNull { if (it[Schedules.stopType] == "LO") 0 else 1 }
 }
 
+// ---- Service response mapping ------------------------------------------------------------------------
+
+/** Maps schedule fields shared by the board and service-search responses. */
+internal fun scheduledServiceResponse(
+    row: ResultRow,
+    platform: String?,
+    platformConfirmed: Boolean,
+    origin: Pair<String, String?>,
+    destination: Pair<String, String?>,
+    actualTime: String,
+    isCancelled: Boolean,
+    cancelReason: String?,
+    isPredicted: Boolean = false,
+    isRunning: Boolean = false,
+    link: String? = null,
+    serviceDate: String = "",
+): ServiceResponse = ServiceResponse(
+    uid = row[Schedules.uid],
+    headcode = row[Schedules.headcode],
+    atocCode = CorpusLookup.operatorForTsc(row[Schedules.tsc]),
+    scheduledTime = row[Schedules.scheduledTime],
+    scheduledArrival = row[Schedules.scheduledArrival],
+    scheduledDeparture = row[Schedules.scheduledDeparture],
+    platform = platform,
+    platformConfirmed = platformConfirmed,
+    isPass = row[Schedules.isPass],
+    stopType = row[Schedules.stopType],
+    originTiploc = origin.first,
+    destTiploc = destination.first,
+    originCrs = origin.second,
+    destCrs = destination.second,
+    actualTime = actualTime,
+    isCancelled = isCancelled,
+    cancelReason = cancelReason,
+    isPredicted = isPredicted,
+    isRunning = isRunning,
+    link = link,
+    serviceDate = serviceDate,
+)
+
 // ---- Platforms ----------------------------------------------------------------------------------------
 
-/**
- * The platform to show and whether it is confirmed: reported movements (by CRS), then Darwin in memory, then Darwin from
- * the database [darwinDb]; otherwise the booked platform, unconfirmed.
- */
+/** Chooses the reported, Darwin or booked platform and whether it is confirmed. */
 internal fun resolvePlatform(
     uid: String,
     tiploc: String,
@@ -226,26 +263,17 @@ private fun searchResults(bestRows: List<ResultRow>, date: String): List<Service
         )
         val (originTiploc, originCrs) = overrides.origin(row)
         val (destTiploc, destCrs) = overrides.dest(row)
-        val svc = ServiceResponse(
-            uid = uid,
-            headcode = row[Schedules.headcode],
-            atocCode = CorpusLookup.operatorForTsc(row[Schedules.tsc]),
-            scheduledTime = scht,
-            scheduledArrival = row[Schedules.scheduledArrival],
-            scheduledDeparture = row[Schedules.scheduledDeparture],
+        val svc = scheduledServiceResponse(
+            row = row,
             platform = platform,
             platformConfirmed = confirmed,
-            isPass = row[Schedules.isPass],
-            stopType = row[Schedules.stopType],
-            originTiploc = originTiploc,
-            destTiploc = destTiploc,
-            originCrs = originCrs,
-            destCrs = destCrs,
+            origin = originTiploc to originCrs,
+            destination = destTiploc to destCrs,
             actualTime = moveEntry?.first ?: "",
             isCancelled = ScheduleCancellations.effectiveCancelled(uid, date, moveEntry?.second ?: false, hasAnyActualTime),
             isRunning = hasAnyActualTime,
             cancelReason = moveEntry?.third
-                ?: if (moveEntry?.second != true && ScheduleCancellations.isCancelled(uid, date)) TIMETABLE_CANCELLED else null
+                ?: if (moveEntry?.second != true && ScheduleCancellations.isCancelled(uid, date)) TIMETABLE_CANCELLED else null,
         )
         applyAssociations(svc, ctx)
     }.withResolvedNames()

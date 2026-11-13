@@ -297,38 +297,44 @@ object LocationData {
     private fun qn(s: String?): String = if (s == null) "NULL" else q(s)
     private fun n(v: Int?): String = v?.toString() ?: "NULL"
 
-    /** Full replace in one transaction: a failed load leaves the previous contents in place. */
-    private fun persistPif(source: String, rows: Collection<PifLoc>) {
+    /** Replaces one reference table in a transaction, inserting sorted rows in bounded batches. */
+    private fun <T> replaceReferenceTable(
+        table: String,
+        rows: Collection<T>,
+        insertPrefix: String,
+        rowValues: (T) -> String,
+    ) {
         try {
             transaction {
-                exec("DELETE FROM pif_loc")
-                for (chunk in rows.sortedBy { it.tiploc }.chunked(400)) {
-                    val values = chunk.joinToString(",") { r ->
-                        "(${q(r.tiploc)},${q(r.name)},${q(r.startDate.toString())},${qn(r.endDate?.toString())},${n(r.easting)},${n(r.northing)}," +
-                            "${q(r.timingPointType)},${q(r.zone)},${qn(r.stanox)},${if (r.offNetwork) 1 else 0},${q(r.forceLpb)},${q(r.action)},${q(source)})"
-                    }
-                    exec("INSERT INTO pif_loc (tiploc, name, start_date, end_date, os_easting, os_northing, timing_point_type, zone, stanox, off_network, force_lpb, action, source_file) VALUES $values")
+                exec("DELETE FROM $table")
+                for (chunk in rows.chunked(400)) {
+                    val values = chunk.joinToString(",") { rowValues(it) }
+                    exec("$insertPrefix$values")
                 }
             }
         } catch (e: Exception) {
-            log.warn("pif_loc table write failed (in-memory data still used): ${e.message}")
+            log.warn("$table table write failed (in-memory data still used): ${e.message}")
         }
     }
 
-    private fun persistNlc(source: String, rows: Collection<NlcEntry>) {
-        try {
-            transaction {
-                exec("DELETE FROM nlc_loc")
-                for (chunk in rows.sortedBy { it.tiploc }.chunked(400)) {
-                    val values = chunk.joinToString(",") { r ->
-                        "(${q(r.tiploc)},${q(r.nlc)},${q(r.captsIdent)},${q(r.checkChar)},${q(r.description)},${q(r.capriDesc)},${q(r.crs)}," +
-                            "${q(r.tiplocOwner)},${q(r.euroLocation)},${q(r.stanox)},${q(r.poMcp)},${q(source)})"
-                    }
-                    exec("INSERT INTO nlc_loc (tiploc, nlc, capts_ident, check_char, description, capri_desc, crs, tiploc_owner, uic, stanox, po_mcp, source_file) VALUES $values")
-                }
-            }
-        } catch (e: Exception) {
-            log.warn("nlc_loc table write failed (in-memory data still used): ${e.message}")
+    /** Full replace in one transaction: a failed load leaves the previous contents in place. */
+    private fun persistPif(source: String, rows: Collection<PifLoc>) =
+        replaceReferenceTable(
+            "pif_loc",
+            rows.sortedBy { it.tiploc },
+            "INSERT INTO pif_loc (tiploc, name, start_date, end_date, os_easting, os_northing, timing_point_type, zone, stanox, off_network, force_lpb, action, source_file) VALUES ",
+        ) { r ->
+            "(${q(r.tiploc)},${q(r.name)},${q(r.startDate.toString())},${qn(r.endDate?.toString())},${n(r.easting)},${n(r.northing)}," +
+                "${q(r.timingPointType)},${q(r.zone)},${qn(r.stanox)},${if (r.offNetwork) 1 else 0},${q(r.forceLpb)},${q(r.action)},${q(source)})"
         }
-    }
+
+    private fun persistNlc(source: String, rows: Collection<NlcEntry>) =
+        replaceReferenceTable(
+            "nlc_loc",
+            rows.sortedBy { it.tiploc },
+            "INSERT INTO nlc_loc (tiploc, nlc, capts_ident, check_char, description, capri_desc, crs, tiploc_owner, uic, stanox, po_mcp, source_file) VALUES ",
+        ) { r ->
+            "(${q(r.tiploc)},${q(r.nlc)},${q(r.captsIdent)},${q(r.checkChar)},${q(r.description)},${q(r.capriDesc)},${q(r.crs)}," +
+                "${q(r.tiplocOwner)},${q(r.euroLocation)},${q(r.stanox)},${q(r.poMcp)},${q(source)})"
+        }
 }
