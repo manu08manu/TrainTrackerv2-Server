@@ -11,6 +11,8 @@ import java.util.concurrent.atomic.AtomicLong
 object TdCorrelator {
     private const val TTL_MS = 180000L
     private const val MAX_SAMPLES = 6
+    /** TD and LINX minute labels differ by a few seconds of clock jitter around a minute boundary; within this many seconds counts as agreeing. */
+    private const val TOLERANCE_S = 30
     private val LONDON: ZoneId = ZoneId.of("Europe/London")
     private val HM: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
     private val HMS: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss")
@@ -46,7 +48,8 @@ object TdCorrelator {
             if (other.fromTd != fromTd && now - other.at < TTL_MS) {
                 val tdMinute = if (fromTd) minute else other.minute
                 val movementMinute = if (fromTd) other.minute else minute
-                if (tdMinute == movementMinute) {
+                val tdExactMs = if (fromTd) exactMs else other.exactMs
+                if (tdMinute == movementMinute || withinTolerance(tdExactMs, movementMinute)) {
                     agree.incrementAndGet()
                 } else {
                     disagree.incrementAndGet()
@@ -60,6 +63,17 @@ object TdCorrelator {
             if (now - other.at >= TTL_MS) expire(key, other)
         }
         pending[key] = Pending(fromTd, minute, exactMs, now)
+    }
+
+    private fun withinTolerance(tdExactMs: Long, movementMinute: String): Boolean {
+        val td = Instant.ofEpochMilli(tdExactMs).atZone(LONDON)
+        val tdSec = td.hour * 3600 + td.minute * 60 + td.second
+        val mvSec = (movementMinute.substring(0, 2).toIntOrNull() ?: return false) * 3600 +
+            (movementMinute.substring(3, 5).toIntOrNull() ?: return false) * 60
+        var d = tdSec - mvSec
+        if (d > 43_200) d -= 86_400
+        if (d < -43_200) d += 86_400
+        return d >= -TOLERANCE_S && d < 60 + TOLERANCE_S
     }
 
     private fun expire(key: String, p: Pending) {
