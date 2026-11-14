@@ -39,7 +39,25 @@ object RdmFiles {
     }
 
     fun isSettled(f: File) = System.currentTimeMillis() - f.lastModified() >= SETTLE_MS
-    fun versionKey(f: File) = "${f.name}|${f.length()}|${f.lastModified()}"
+    /**
+     * Identity of a file's content: name, size and SHA-256. The mtime is ignored on purpose, because the
+     * feed folder gets files re-copied hourly with identical content (a re-gzipped copy only changes the header timestamp), which must not count as a new file. For .gz files the decompressed content is hashed.
+     */
+    fun versionKey(f: File): String {
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        val raw = f.inputStream().buffered()
+        val stream: java.io.InputStream =
+            if (f.name.endsWith(".gz", ignoreCase = true)) java.util.zip.GZIPInputStream(raw) else raw
+        stream.use { input ->
+            val buf = ByteArray(65536)
+            while (true) {
+                val n = input.read(buf)
+                if (n < 0) break
+                md.update(buf, 0, n)
+            }
+        }
+        return "${f.name}|${f.length()}|${md.digest().joinToString("") { "%02x".format(it) }}"
+    }
 
     /** Helper for CSV feeds. */
     fun readCsv(f: File): List<List<String>> {
@@ -107,6 +125,13 @@ class RdmFeed(
 object RdmWatcher {
     private val log = LoggerFactory.getLogger("RdmWatcher")
     private val feeds = CopyOnWriteArrayList<RdmFeed>()
+    /** Passes run at this minute past every hour (the RDM drops land about :10-:12), not an hour after start-up. */
+    private const val PASS_MINUTE = 20
+
+    private fun millisUntilNextPass(now: Long = System.currentTimeMillis()): Long {
+        val hour = 3_600_000L
+        return hour - Math.floorMod(now - PASS_MINUTE * 60_000L, hour)
+    }
     @Volatile private var job: Job? = null
 
     fun register(feed: RdmFeed) {
@@ -130,7 +155,9 @@ object RdmWatcher {
                         log.warn("${feed.name} refresh failed: ${e.message}")
                     }
                 }
-                delay(3_600_000L)
+                val wait = millisUntilNextPass()
+                log.info("RDM pass complete (${feeds.size} feeds), next in ${wait / 60_000} min")
+                delay(wait)
             }
         }
         job = j
