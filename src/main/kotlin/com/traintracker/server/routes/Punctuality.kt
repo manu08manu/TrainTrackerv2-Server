@@ -57,7 +57,6 @@ internal data class TimetabledStop(
     val crs: String, val stanox: String?, val scheduledTime: String, val scheduledArrival: String?, val scheduledDeparture: String?, val stopType: String,
 )
 
-private val CRS_ALIASES = mapOf("PDX" to "PAD", "FDX" to "FOG", "LSX" to "LST", "ABX" to "ABW", "WHX" to "WWC")
 
 /** Minutes between two "HH:MM" times, either way round, across midnight. */
 private fun gapMinutes(a: String, b: String): Int = kotlin.math.abs(minutesLate(a, b))
@@ -75,7 +74,7 @@ private const val MATCH_WINDOW_MINUTES = 10
  * STANOX can carry another station's CRS (Clapham Junction reports as XCP), else the CRS.
  */
 internal fun callOutcomes(stops: List<TimetabledStop>, moves: List<ReportedMovement>, activationOriginCrs: String?): List<CallOutcome> {
-    fun crsKey(crs: String) = "C:${CRS_ALIASES[crs] ?: crs}"
+    fun crsKey(crs: String) = "C:$crs"
     val byLocation = HashMap<String, MutableList<ReportedMovement>>()
     for (m in moves) {
         if (m.scheduledTime.isNullOrEmpty()) continue

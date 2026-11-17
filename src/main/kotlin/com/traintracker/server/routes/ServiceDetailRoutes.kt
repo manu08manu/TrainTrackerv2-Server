@@ -28,8 +28,6 @@ import org.jetbrains.exposed.v1.core.eq
 import org.jetbrains.exposed.v1.jdbc.JdbcTransaction
 import org.jetbrains.exposed.v1.jdbc.selectAll
 
-/** Movements report some stations under a different CRS from the timetable. */
-private val MOVEMENT_CRS_ALIASES = mapOf("PDX" to "PAD", "FDX" to "FOG", "LSX" to "LST", "ABX" to "ABW", "WHX" to "WWC")
 
 /** A service's route as built from the timetable and live data. */
 private class ServiceRoute(
@@ -405,7 +403,6 @@ private fun JdbcTransaction.movementTimes(uid: String, svcDate: String, tdOverla
             val actual = td?.minute ?: rs.getString("actual_time") ?: ""
             val actualSec = td?.seconds ?: ""
             val crs = (rs.getString("crs")?.takeIf { it.isNotEmpty() } ?: CorpusLookup.crsFromStanox(rs.getString("stanox") ?: ""))
-                ?.let { MOVEMENT_CRS_ALIASES[it] ?: it }
             if (crs != null) times.reports += MovementTimes.Report(crs, scht, actual, actualSec, eventType, isCancelled, cancelReason)
             // A report with no booked time (a location the train was moved to) is only matched by location.
             if (scht.isEmpty()) continue
