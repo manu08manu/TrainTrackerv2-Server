@@ -96,9 +96,8 @@ object AppDatabase {
     fun pruneExpired() {
         transaction { Movements.deleteWhere { Movements.eventTs less LocalDateTime.now().minusDays(Retention.MOVEMENT_DAYS) } }
         transaction { TrainLocations.deleteWhere { TrainLocations.updatedAt less LocalDateTime.now().minusHours(24L) } }
-        transaction { AllocationConsists.deleteWhere { AllocationConsists.updatedAt less LocalDateTime.now(ZoneOffset.UTC).minusDays(Retention.ALLOCATION_DAYS) } }
         transaction { AllocationLegs.deleteWhere { AllocationLegs.updatedAt less LocalDateTime.now().minusDays(Retention.ALLOCATION_DAYS) } }
-        transaction { AllocationHistory.deleteWhere { AllocationHistory.recordedAt less LocalDateTime.now().minusDays(Retention.ALLOCATION_DAYS) } }
+        transaction { AllocationDays.deleteWhere { AllocationDays.updatedAt less LocalDateTime.now(ZoneOffset.UTC).minusDays(Retention.ALLOCATION_DAYS) } }
         transaction { AllocationChanges.deleteWhere { AllocationChanges.changedAt less LocalDateTime.now(ZoneOffset.UTC).minusDays(Retention.ALLOCATION_DAYS) } }
         listOf(
             "DELETE FROM darwin_platforms WHERE updated_at < datetime('now', '-24 hours')",
@@ -451,8 +450,8 @@ object AppDatabase {
                 movementCount = count("SELECT COUNT(*) FROM movements"),
                 movementCount24h = Movements.selectAll()
                     .where { Movements.eventTs greaterEq LocalDateTime.now().minusHours(24L) }.count().toInt(),
-                allocationsToday = count("SELECT COUNT(DISTINCT headcode) FROM allocation_history WHERE service_date=?", listOf(today)),
-                allocationRecords = AllocationConsists.selectAll().count().toInt(),
+                allocationsToday = count("SELECT COUNT(DISTINCT headcode) FROM allocation_days WHERE service_date=?", listOf(today)),
+                allocationRecords = AllocationDays.selectAll().count().toInt(),
                 tiplocNameCount = CorpusLookup.tiplocNameCount(),
                 cifChangePendingCount = count("SELECT COUNT(*) FROM cif_change_alerts WHERE dismissed_at IS NULL"),
                 missingTiplocCount = count("SELECT COUNT(*) FROM missing_tiplocs"),

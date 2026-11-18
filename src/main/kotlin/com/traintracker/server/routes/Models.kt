@@ -231,3 +231,6 @@ fun List<ServiceResponse>.withResolvedNames(): List<ServiceResponse> {
 }
 
 fun CallingPointResponse.effectiveTime(): String = scheduledDeparture ?: scheduledArrival ?: scheduledTime
+
+@Serializable
+data class UnitClassResponse(val unitClass: String, val count: Int, val units: List<String>)

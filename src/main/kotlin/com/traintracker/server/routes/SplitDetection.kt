@@ -33,7 +33,7 @@ fun JdbcTransaction.lookupJoinsInto(uid: String, date: String): Pair<String?, St
 
 /** Number of vehicles allocated, or null when none. */
 fun JdbcTransaction.lookupCoachCount(uid: String, date: String): Int? =
-    queryFirst("SELECT vehicles FROM allocation_consists WHERE uid=? AND service_date=? LIMIT 1", listOf(uid, date)) {
+    queryFirst("SELECT vehicles FROM allocation_days WHERE uid=? AND service_date=? LIMIT 1", listOf(uid, date)) {
         it.getString("vehicles")
     }.csvList().size.takeIf { it > 0 }
 
@@ -51,7 +51,7 @@ fun JdbcTransaction.detectUnitBasedSplitParent(uid: String, date: String): Split
     val myUnits = unitSet(uid, date)
     if (myUnits.isEmpty()) return null
     val candidates = queryList(
-        "SELECT uid, units FROM allocation_consists WHERE service_date=? AND uid != ? AND (${myUnits.joinToString(" OR ") { "units LIKE ?" }})",
+        "SELECT uid, units FROM allocation_days WHERE service_date=? AND uid != ? AND (${myUnits.joinToString(" OR ") { "units LIKE ?" }})",
         listOf(date, uid) + myUnits.map { "%$it%" }
     ) { rs ->
         val cUid = rs.getString("uid") ?: return@queryList null
@@ -75,7 +75,7 @@ fun JdbcTransaction.detectUnitBasedSplits(uid: String, date: String): List<Split
     if (myUnits.size < 2) return emptyList()
     data class Portion(val uid: String, val headcode: String, val unitsKey: String)
     val portions = queryList(
-        "SELECT uid, headcode, units FROM allocation_consists WHERE service_date=? AND uid != ? AND (${myUnits.joinToString(" OR ") { "units LIKE ?" }})",
+        "SELECT uid, headcode, units FROM allocation_days WHERE service_date=? AND uid != ? AND (${myUnits.joinToString(" OR ") { "units LIKE ?" }})",
         listOf(date, uid) + myUnits.map { "%$it%" }
     ) { rs ->
         val cUid = rs.getString("uid") ?: return@queryList null

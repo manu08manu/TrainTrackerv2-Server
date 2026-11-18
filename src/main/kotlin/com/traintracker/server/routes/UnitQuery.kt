@@ -77,7 +77,7 @@ internal fun queryByUnit(unit: String, date: String = LocalDate.now().toString()
                 val excluded = seenUids.map { it.take(6) }.toSet()
                 val notIn = if (excluded.isEmpty()) "''" else placeholders(excluded.size)
                 query(
-                    "SELECT ac.headcode, ac.units, ac.vehicles, ac.operator, ac.core_id FROM allocation_consists ac WHERE (',' || ac.units || ',') LIKE '%,' || ? || ',%' AND ac.service_date = ? AND ac.core_id NOT IN ($notIn)",
+                    "SELECT ac.headcode, ac.units, ac.vehicles, ac.operator, ac.core_id FROM allocation_days ac WHERE (',' || ac.units || ',') LIKE '%,' || ? || ',%' AND ac.service_date = ? AND ac.core_id NOT IN ($notIn)",
                     listOf(partner, date) + excluded
                 ) { rs ->
                     while (rs.next()) {
@@ -190,7 +190,7 @@ private fun JdbcTransaction.unitWorkings(unit: String, date: String): List<UnitW
     val workings = mutableListOf<UnitWorking>()
     try {
         query(
-            "SELECT ac.headcode, ac.units, ac.vehicles, ac.operator, ac.core_id, ac.uid FROM allocation_consists ac WHERE (',' || ac.units || ',') LIKE '%,' || ? || ',%' AND ac.service_date = ? AND SUBSTR(ac.units, 1, 3) = SUBSTR(?, 1, 3)",
+            "SELECT ac.headcode, ac.units, ac.vehicles, ac.operator, ac.core_id, ac.uid FROM allocation_days ac WHERE (',' || ac.units || ',') LIKE '%,' || ? || ',%' AND ac.service_date = ? AND SUBSTR(ac.units, 1, 3) = SUBSTR(?, 1, 3)",
             listOf(unit, date, unit)
         ) { rs ->
             while (rs.next()) {
@@ -247,4 +247,22 @@ private fun annotateUnitDay(svc: ServiceResponse, day: List<ServiceResponse>, sv
         result = result.copy(association = result.association.copy(formsUid = next.uid, formsHeadcode = next.headcode))
     }
     return result
+}
+
+/** Class of a unit number: 3 digits for 6-digit units (360101 -> 360), 2 for 5-digit locos (66001 -> 66). */
+internal fun unitClass(unit: String) = if (unit.length >= 6) unit.take(3) else unit.take(2)
+
+/** Units with an allocation on [date] whose number starts with [prefix], grouped by class. */
+internal fun unitClassesInUse(prefix: String, date: String): List<UnitClassResponse> = transaction {
+    val units = sortedSetOf<String>()
+    query(
+        "SELECT DISTINCT units FROM allocation_days WHERE service_date = ? AND units LIKE '%' || ? || '%'",
+        listOf(date, prefix)
+    ) { rs ->
+        while (rs.next()) {
+            val csv = rs.getString("units") ?: continue
+            csv.csvList().filterTo(units) { it.startsWith(prefix) }
+        }
+    }
+    units.groupBy { unitClass(it) }.map { (cls, list) -> UnitClassResponse(cls, list.size, list) }
 }
