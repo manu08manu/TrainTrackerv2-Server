@@ -17,8 +17,8 @@ object Schema {
         "ELSE headcode END"
 
     private val exposedTables = arrayOf(
-        SavedMaps, Schedules, Movements, TrainLocations, CifMeta, AllocationConsists, AllocationLegs,
-        HeadcodeAliases, AllocationHistory, AllocationChanges, CifAssociations, DarwinPlatforms,
+        SavedMaps, Schedules, Movements, TrainLocations, CifMeta, AllocationLegs,
+        HeadcodeAliases, AllocationChanges, CifAssociations, DarwinPlatforms,
         TrainActivations,
     )
 
@@ -73,11 +73,17 @@ object Schema {
         "CREATE INDEX IF NOT EXISTS idx_punctuality_date ON punctuality_daily(date)",
         "CREATE TABLE IF NOT EXISTS punctuality_days (date TEXT PRIMARY KEY, built_at TEXT NOT NULL, calls INTEGER NOT NULL)",
         "CREATE TABLE IF NOT EXISTS linx_raw (id INTEGER PRIMARY KEY AUTOINCREMENT, flow TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', xml TEXT NOT NULL, received_ms INTEGER NOT NULL)",
+        // allocation_days: one row per service per day (latest + first of day, UTC). Initially built by scripts/migrate_allocation_days.py.
+        "CREATE TABLE IF NOT EXISTS allocation_days (core_id VARCHAR(20) NOT NULL, service_date VARCHAR(10) NOT NULL, headcode VARCHAR(6) NOT NULL, operator VARCHAR(10) NOT NULL, vehicles VARCHAR(2000) NOT NULL, units VARCHAR(500) NOT NULL DEFAULT '', unit_count INT NOT NULL DEFAULT 0, updated_at TEXT NOT NULL, uid VARCHAR(10) NULL, first_vehicles VARCHAR(2000) NOT NULL, first_units VARCHAR(500) NOT NULL DEFAULT '', first_unit_count INT NOT NULL DEFAULT 0, first_recorded_at TEXT NOT NULL, PRIMARY KEY (core_id, service_date))",
+        "CREATE INDEX IF NOT EXISTS idx_alloc_days_hc_date ON allocation_days (headcode, service_date)",
+        "CREATE INDEX IF NOT EXISTS idx_alloc_days_uid_date ON allocation_days (uid, service_date)",
+        "CREATE INDEX IF NOT EXISTS idx_alloc_days_date ON allocation_days (service_date)",
     )
 
     fun create() {
         renameTrustMovements()
         retireHsp()
+        parkOldAllocationLegs()
         transaction {
             MigrationUtils.statementsRequiredForDatabaseMigration(*exposedTables).forEach { sql ->
                 if (sql.uppercase().contains("DROP ")) {
@@ -88,7 +94,7 @@ object Schema {
                 }
             }
         }
-        backfillAllocationUids()
+        restoreAllocationLegs()
         transaction {
             rawTables.forEach { exec(it) }
             addMasterAdminColumn()
@@ -181,18 +187,54 @@ object Schema {
         log.info("Migrated is_master_admin column; bootstrap master admin: $MASTER_ADMIN_BOOTSTRAP_EMAIL")
     }
 
-    /** Fills allocation uid from core_id (headcode + optional space + uid + 2 digit suffix). */
-    private fun backfillAllocationUids() {
-        val uidFromCoreId =
-            "CASE WHEN substr(core_id, length(headcode)+1, 1) = ' ' THEN substr(core_id, length(headcode)+2, length(core_id)-length(headcode)-1-2) ELSE substr(core_id, length(headcode)+1, length(core_id)-length(headcode)-2) END"
-        transaction {
-            try {
-                exec("UPDATE allocation_consists SET uid = $uidFromCoreId WHERE length(core_id) > length(headcode)+2")
-                exec("UPDATE allocation_history SET uid = $uidFromCoreId WHERE length(core_id) > length(headcode)+2")
-                log.info("Allocation uid backfill complete")
-            } catch (e: Exception) {
-                log.warn("Allocation uid backfill failed: ${e.message}")
-            }
+
+    /**
+     * allocation_legs was keyed by (core_id, allocation_seq), so each core kept only its latest day:
+     * replaceLegs deleted by core_id alone. The key now includes service_date. SQLite cannot alter a
+     * primary key, so the old table is parked before Exposed's migration creates the new one. Its
+     * explicit indexes are dropped at the same time, or their names would collide with the new table's.
+     */
+    private fun parkOldAllocationLegs() = transaction {
+        val tables = queryList("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('allocation_legs', 'allocation_legs_old')") { it.getString(1) }
+        if ("allocation_legs_old" in tables) {
+            log.info("allocation_legs already parked as allocation_legs_old")
+            return@transaction
         }
+        if ("allocation_legs" !in tables) return@transaction
+        val pk = queryList("PRAGMA table_info(allocation_legs)") { it.getString(2) to it.getInt("pk") }
+            .filter { it.second > 0 }
+            .map { it.first }
+        if ("service_date" in pk) {
+            log.info("allocation_legs already keyed by service_date (${pk.joinToString(",")})")
+            return@transaction
+        }
+        exec("ALTER TABLE allocation_legs RENAME TO allocation_legs_old")
+        val indexes = queryList("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'allocation_legs_old' AND name NOT LIKE 'sqlite_%'") { it.getString(1) }
+        indexes.forEach { exec("DROP INDEX IF EXISTS \"$it\"") }
+        log.info("Parked allocation_legs as allocation_legs_old (old key: ${pk.joinToString(",")}), dropped ${indexes.size} index(es)")
+    }
+
+    /**
+     * Copies the parked rows into the re-keyed table, then drops the parked table. Runs after the
+     * Exposed migration has created allocation_legs. Idempotent: if the copy is interrupted the
+     * parked table survives and the next startup retries.
+     */
+    private fun restoreAllocationLegs() = transaction {
+        val tables = queryList("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('allocation_legs', 'allocation_legs_old')") { it.getString(1) }
+        if ("allocation_legs_old" !in tables || "allocation_legs" !in tables) return@transaction
+        val oldCols = queryList("PRAGMA table_info(allocation_legs_old)") { it.getString(2) }.toSet()
+        val newCols = queryList("PRAGMA table_info(allocation_legs)") { it.getString(2) }.toSet()
+        val shared = oldCols.intersect(newCols)
+        val required = setOf("core_id", "allocation_seq", "headcode", "service_date", "resource_group_id", "vehicles", "origin_stanox", "dest_stanox", "updated_at")
+        val missing = required - shared
+        if (missing.isNotEmpty()) {
+            log.warn("Not restoring allocation_legs: allocation_legs_old lacks $missing. Table left in place.")
+            return@transaction
+        }
+        val columns = shared.joinToString(", ")
+        val rows = queryList("SELECT count(*) FROM allocation_legs_old") { it.getInt(1) }.first()
+        exec("INSERT OR IGNORE INTO allocation_legs ($columns) SELECT $columns FROM allocation_legs_old")
+        exec("DROP TABLE allocation_legs_old")
+        log.info("Restored allocation_legs from allocation_legs_old: $rows row(s)")
     }
 }

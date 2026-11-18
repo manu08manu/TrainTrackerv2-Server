@@ -1,5 +1,7 @@
 package com.traintracker.server.database
 
+import org.jetbrains.exposed.v1.jdbc.update
+
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.ZoneOffset
@@ -9,6 +11,7 @@ import org.jetbrains.exposed.v1.core.ResultRow
 import org.jetbrains.exposed.v1.core.SortOrder
 import org.jetbrains.exposed.v1.core.and
 import org.jetbrains.exposed.v1.core.eq
+import org.jetbrains.exposed.v1.core.lessEq
 import org.jetbrains.exposed.v1.jdbc.JdbcTransaction
 import org.jetbrains.exposed.v1.jdbc.deleteWhere
 import org.jetbrains.exposed.v1.jdbc.insert
@@ -20,11 +23,11 @@ import org.slf4j.LoggerFactory
 
 /** The units string of a uid's current consist on a date, or null when there is none. */
 fun JdbcTransaction.unitsCsv(uid: String, date: String): String? =
-    queryFirst("SELECT units FROM allocation_consists WHERE uid=? AND service_date=? LIMIT 1", listOf(uid, date)) {
+    queryFirst("SELECT units FROM allocation_days WHERE uid=? AND service_date=? LIMIT 1", listOf(uid, date)) {
         it.getString("units")
     }?.takeIf { it.isNotBlank() }
 
-/** Unit allocations from the allocation feed: current consist, daily history, change log and per-leg detail. */
+/** Unit allocations from the allocation feed: one row per service per day (latest and first report), change log and per-leg detail. */
 object Allocations {
     private val log = LoggerFactory.getLogger("Database")
     private val writeLock = ReentrantLock()
@@ -85,7 +88,7 @@ object Allocations {
 
     // ---- Writes --------------------------------------------------------------------------------------
 
-    /** Stores the current consist, logs a change when units or vehicles differ, and keeps the first report of the day. */
+    /** Stores the day's latest allocation, logs a change when units or vehicles differ, and keeps the first report of the day once. */
     fun upsert(
         coreId: String,
         headcode: String,
@@ -112,9 +115,13 @@ object Allocations {
         val vehiclesCsv = vehicles.joinToString(",")
         val unitsCsv = units.joinToString(",")
         transaction {
-            val old = AllocationConsists.selectAll().where { AllocationConsists.coreId eq coreId }.singleOrNull()
-            val oldVehicles = old?.get(AllocationConsists.vehicles) ?: ""
-            val oldUnits = if (oldVehicles.isEmpty()) "" else old?.get(AllocationConsists.units) ?: ""
+            // Baseline for the change log: this date's row if there is one, else the newest earlier date's.
+            val old = AllocationDays.selectAll()
+                .where { (AllocationDays.coreId eq coreId) and (AllocationDays.serviceDate lessEq serviceDate) }
+                .orderBy(AllocationDays.serviceDate, SortOrder.DESC)
+                .firstOrNull()
+            val oldVehicles = old?.get(AllocationDays.vehicles) ?: ""
+            val oldUnits = if (oldVehicles.isEmpty()) "" else old?.get(AllocationDays.units) ?: ""
             val newUnits = if (vehicles.isEmpty()) "" else unitsCsv
             if (oldVehicles != vehiclesCsv || oldUnits != newUnits) {
                 AllocationChanges.insert {
@@ -129,27 +136,33 @@ object Allocations {
                     it[AllocationChanges.newCoaches] = vehicles.size
                 }
             }
-            AllocationConsists.replace {
-                it[AllocationConsists.coreId] = coreId
-                it[AllocationConsists.headcode] = headcode
-                it[AllocationConsists.serviceDate] = serviceDate
-                it[AllocationConsists.operator] = operator
-                it[AllocationConsists.vehicles] = vehiclesCsv
-                it[AllocationConsists.units] = unitsCsv
-                it[AllocationConsists.unitCount] = unitCount
-                it[AllocationConsists.updatedAt] = LocalDateTime.now(ZoneOffset.UTC)
-                it[AllocationConsists.uid] = uid
-            }
-            AllocationHistory.insertIgnore {
-                it[AllocationHistory.coreId] = coreId
-                it[AllocationHistory.headcode] = headcode
-                it[AllocationHistory.serviceDate] = serviceDate
-                it[AllocationHistory.operator] = operator
-                it[AllocationHistory.vehicles] = vehiclesCsv
-                it[AllocationHistory.units] = unitsCsv
-                it[AllocationHistory.unitCount] = unitCount
-                it[AllocationHistory.recordedAt] = LocalDateTime.now()
-                it[AllocationHistory.uid] = uid
+            // One row per service per day: latest message in the main columns, first_* written once.
+            val nowUtc = LocalDateTime.now(ZoneOffset.UTC)
+            val inserted = AllocationDays.insertIgnore {
+                it[AllocationDays.coreId] = coreId
+                it[AllocationDays.serviceDate] = serviceDate
+                it[AllocationDays.headcode] = headcode
+                it[AllocationDays.operator] = operator
+                it[AllocationDays.vehicles] = vehiclesCsv
+                it[AllocationDays.units] = unitsCsv
+                it[AllocationDays.unitCount] = unitCount
+                it[AllocationDays.updatedAt] = nowUtc
+                it[AllocationDays.uid] = uid
+                it[AllocationDays.firstVehicles] = vehiclesCsv
+                it[AllocationDays.firstUnits] = unitsCsv
+                it[AllocationDays.firstUnitCount] = unitCount
+                it[AllocationDays.firstRecordedAt] = nowUtc
+            }.insertedCount
+            if (inserted == 0) {
+                AllocationDays.update({ (AllocationDays.coreId eq coreId) and (AllocationDays.serviceDate eq serviceDate) }) {
+                    it[AllocationDays.headcode] = headcode
+                    it[AllocationDays.operator] = operator
+                    it[AllocationDays.vehicles] = vehiclesCsv
+                    it[AllocationDays.units] = unitsCsv
+                    it[AllocationDays.unitCount] = unitCount
+                    it[AllocationDays.updatedAt] = nowUtc
+                    it[AllocationDays.uid] = uid
+                }
             }
         }
     }
@@ -158,7 +171,7 @@ object Allocations {
         if (coreId.isEmpty()) return
         val uid = uidFromCoreId(coreId, headcode)
         transaction {
-            AllocationLegs.deleteWhere { AllocationLegs.coreId eq coreId }
+            AllocationLegs.deleteWhere { (AllocationLegs.coreId eq coreId) and (AllocationLegs.serviceDate eq serviceDate) }
             for (leg in legs) {
                 AllocationLegs.insert {
                     it[AllocationLegs.coreId] = coreId
@@ -208,16 +221,10 @@ object Allocations {
 
     private fun splitCsv(csv: String?): List<String> = csv.orEmpty().split(",").filter { it.isNotEmpty() }
 
-    private fun ResultRow.toConsist() = allocation(
-        this[AllocationConsists.coreId], this[AllocationConsists.headcode], this[AllocationConsists.serviceDate],
-        this[AllocationConsists.operator], this[AllocationConsists.vehicles], this[AllocationConsists.units],
-        this[AllocationConsists.unitCount], this[AllocationConsists.updatedAt].toString()
-    )
-
-    private fun ResultRow.toHistory() = allocation(
-        this[AllocationHistory.coreId], this[AllocationHistory.headcode], this[AllocationHistory.serviceDate],
-        this[AllocationHistory.operator], this[AllocationHistory.vehicles], this[AllocationHistory.units],
-        this[AllocationHistory.unitCount], this[AllocationHistory.recordedAt].toString()
+    private fun ResultRow.toDay() = allocation(
+        this[AllocationDays.coreId], this[AllocationDays.headcode], this[AllocationDays.serviceDate],
+        this[AllocationDays.operator], this[AllocationDays.vehicles], this[AllocationDays.units],
+        this[AllocationDays.unitCount], this[AllocationDays.updatedAt].toString()
     )
 
     /** Reads the 8 columns core_id, headcode, service_date, operator, vehicles, units, unit_count, <timestamp>. */
@@ -241,8 +248,8 @@ object Allocations {
         ) { (it.getString(1) ?: "").filter { c -> c.isLetterOrDigit() } } ?: ""
         if (hc.isEmpty()) {
             val headcodes = queryList(
-                "SELECT DISTINCT headcode FROM allocation_consists WHERE uid = ? AND service_date = ? UNION SELECT DISTINCT headcode FROM allocation_history WHERE uid = ? AND service_date = ?",
-                listOf(safeUid, day, safeUid, day)
+                "SELECT DISTINCT headcode FROM allocation_days WHERE uid = ? AND service_date = ?",
+                listOf(safeUid, day)
             ) { it.getString(1) }.toSet()
             when (headcodes.size) {
                 0 -> return@transaction null
@@ -256,12 +263,12 @@ object Allocations {
             }
         }
         queryFirst(
-            "SELECT core_id, headcode, service_date, operator, vehicles, units, unit_count, updated_at FROM allocation_consists WHERE uid = ? AND headcode = ? AND service_date = ? UNION ALL SELECT core_id, headcode, service_date, operator, vehicles, units, unit_count, recorded_at FROM allocation_history WHERE uid = ? AND headcode = ? AND service_date = ? AND NOT EXISTS (SELECT 1 FROM allocation_consists WHERE uid = ? AND headcode = ? AND service_date = ?) ORDER BY service_date DESC LIMIT 1",
-            List(3) { listOf(safeUid, hc, day) }.flatten()
+            "SELECT core_id, headcode, service_date, operator, vehicles, units, unit_count, updated_at FROM allocation_days WHERE uid = ? AND headcode = ? AND service_date = ? LIMIT 1",
+            listOf(safeUid, hc, day)
         ) { allocationFromColumns(it, 8) }
     }
 
-    /** Allocations for many (uid -> headcode) pairs on one date: current consists first, then history. */
+    /** Allocations for many (uid -> headcode) pairs on one date. */
     fun byUids(uidHeadcodes: Map<String, String>, date: String? = null): Map<String, Allocation> {
         if (uidHeadcodes.isEmpty()) return emptyMap()
         val day = safeDate(date)
@@ -285,40 +292,33 @@ object Allocations {
                     }
                 }
             }
-            fetch("allocation_consists", "updated_at", "", wanted)
-            val missing = wanted.filterKeys { it !in results }
-            if (missing.isNotEmpty()) fetch("allocation_history", "recorded_at", " ORDER BY service_date DESC", missing)
+            fetch("allocation_days", "updated_at", "", wanted)
         }
         return results
     }
 
+    /** The newest day's allocation for a core_id. */
     fun byCoreId(coreId: String): Allocation? = transaction {
-        AllocationConsists.selectAll().where { AllocationConsists.coreId eq coreId }.singleOrNull()?.toConsist()
+        AllocationDays.selectAll()
+            .where { AllocationDays.coreId eq coreId }
+            .orderBy(AllocationDays.serviceDate, SortOrder.DESC)
+            .firstOrNull()
+            ?.toDay()
     }
 
-    /** Current consists for a headcode (newest first), falling back to history. */
+    /** Allocations for a headcode, newest first. Without a date, one row per core_id (its newest day). */
     fun byHeadcode(headcode: String, serviceDate: String? = null): List<Allocation> = transaction {
-        val current = AllocationConsists.selectAll()
+        val rows = AllocationDays.selectAll()
             .where {
                 if (serviceDate != null) {
-                    (AllocationConsists.headcode eq headcode) and (AllocationConsists.serviceDate eq serviceDate)
+                    (AllocationDays.headcode eq headcode) and (AllocationDays.serviceDate eq serviceDate)
                 } else {
-                    AllocationConsists.headcode eq headcode
+                    AllocationDays.headcode eq headcode
                 }
             }
-            .orderBy(AllocationConsists.updatedAt, SortOrder.DESC)
-            .map { it.toConsist() }
-        if (current.isNotEmpty()) return@transaction current
-        AllocationHistory.selectAll()
-            .where {
-                if (serviceDate != null) {
-                    (AllocationHistory.headcode eq headcode) and (AllocationHistory.serviceDate eq serviceDate)
-                } else {
-                    AllocationHistory.headcode eq headcode
-                }
-            }
-            .orderBy(AllocationHistory.recordedAt, SortOrder.DESC)
-            .map { it.toHistory() }
+            .orderBy(AllocationDays.updatedAt, SortOrder.DESC)
+            .map { it.toDay() }
+        if (serviceDate == null) rows.distinctBy { it.coreId } else rows
     }
 
     fun changes(uid: String, serviceDate: String): List<Change> = transaction {
@@ -379,7 +379,7 @@ object Allocations {
             transaction {
                 val result = mutableMapOf<String, MutableSet<String>>()
                 query(
-                    "SELECT uid, units FROM allocation_consists WHERE uid IN (${placeholders(uids.size)}) AND service_date = ?",
+                    "SELECT uid, units FROM allocation_days WHERE uid IN (${placeholders(uids.size)}) AND service_date = ?",
                     uids.toList() + safeDate
                 ) { rs ->
                     while (rs.next()) {
@@ -424,7 +424,7 @@ object Allocations {
                     var best: Triple<String, String, String>? = null   // uid, headcode, service date
                     var bestKey: String? = null
                     query(
-                        "SELECT ac.uid AS u, ac.headcode AS hc, ac.service_date AS sd, MIN(s.scheduled_time) AS lo FROM allocation_consists ac JOIN schedules s ON s.uid = ac.uid AND s.stop_type = 'LO' AND s.tiploc = ? WHERE ac.uid != ? AND (',' || ac.units || ',') LIKE ? AND ((ac.service_date = ? AND $SCHEDULE_DATE_SCOPE_SQL) OR (ac.service_date = ? AND $SCHEDULE_DATE_SCOPE_SQL)) GROUP BY ac.uid, ac.headcode, ac.service_date",
+                        "SELECT ac.uid AS u, ac.headcode AS hc, ac.service_date AS sd, MIN(s.scheduled_time) AS lo FROM allocation_days ac JOIN schedules s ON s.uid = ac.uid AND s.stop_type = 'LO' AND s.tiploc = ? WHERE ac.uid != ? AND (',' || ac.units || ',') LIKE ? AND ((ac.service_date = ? AND $SCHEDULE_DATE_SCOPE_SQL) OR (ac.service_date = ? AND $SCHEDULE_DATE_SCOPE_SQL)) GROUP BY ac.uid, ac.headcode, ac.service_date",
                         listOf(terminusTiploc, safeUid, "%,$unit,%", safeDate) + scope + nextDate + nextScope
                     ) { rs ->
                         while (rs.next()) {
@@ -475,7 +475,7 @@ object Allocations {
                     for ((bucketDate, bucketEffectiveDate) in buckets) {
                         val scope = scheduleDateScopeArgs(bucketEffectiveDate)
                         query(
-                            "SELECT ac.uid AS u, ac.headcode AS hc, MAX(s.scheduled_time) AS lt, (SELECT MIN(s3.scheduled_time) FROM schedules s3 WHERE s3.uid = ac.uid AND s3.stop_type = 'LO' AND $SCHEDULE_DATE_SCOPE_SQL) AS ownLo FROM allocation_consists ac JOIN schedules s ON s.uid = ac.uid AND s.stop_type = 'LT' AND s.tiploc = ? WHERE ac.service_date = ? AND ac.uid != ? AND (',' || ac.units || ',') LIKE ? AND $SCHEDULE_DATE_SCOPE_SQL GROUP BY ac.uid, ac.headcode",
+                            "SELECT ac.uid AS u, ac.headcode AS hc, MAX(s.scheduled_time) AS lt, (SELECT MIN(s3.scheduled_time) FROM schedules s3 WHERE s3.uid = ac.uid AND s3.stop_type = 'LO' AND $SCHEDULE_DATE_SCOPE_SQL) AS ownLo FROM allocation_days ac JOIN schedules s ON s.uid = ac.uid AND s.stop_type = 'LT' AND s.tiploc = ? WHERE ac.service_date = ? AND ac.uid != ? AND (',' || ac.units || ',') LIKE ? AND $SCHEDULE_DATE_SCOPE_SQL GROUP BY ac.uid, ac.headcode",
                             scope + listOf(originTiploc, bucketDate, safeUid, "%,$unit,%") + scope
                         ) { rs ->
                             while (rs.next()) {

@@ -140,45 +140,6 @@ object CifAssociations : Table("cif_associations") {
     override val primaryKey = PrimaryKey(mainUid, assocUid, assocTiploc, name = "pk_cif_associations")
 }
 
-object AllocationConsists : Table("allocation_consists") {
-    val coreId = varchar("core_id", 20)
-    val headcode = varchar("headcode", 6)
-    val serviceDate = varchar("service_date", 10)
-    val operator = varchar("operator", 10)
-    val vehicles = varchar("vehicles", 2000)
-    val units = varchar("units", 500).default("")
-    val unitCount = integer("unit_count").default(0)
-    val updatedAt = datetime("updated_at")
-    val uid = varchar("uid", 10).nullable()
-
-    override val primaryKey = PrimaryKey(coreId, name = "pk_allocation_consists")
-
-    init {
-        index("idx_alloc_hc_date", false, headcode, serviceDate)
-        index("idx_alloc_consists_uid_date", false, uid, serviceDate)
-    }
-}
-
-object AllocationHistory : Table("allocation_history") {
-    val coreId = varchar("core_id", 20)
-    val headcode = varchar("headcode", 6)
-    val serviceDate = varchar("service_date", 10)
-    val operator = varchar("operator", 10)
-    val vehicles = varchar("vehicles", 2000)
-    val units = varchar("units", 500).default("")
-    val unitCount = integer("unit_count").default(0)
-    val recordedAt = datetime("recorded_at")
-    val uid = varchar("uid", 10).nullable()
-
-    override val primaryKey = PrimaryKey(coreId, serviceDate, name = "pk_allocation_history")
-
-    init {
-        index("idx_alloc_hist_core_date", false, coreId, serviceDate)
-        index("idx_alloc_hist_date", false, serviceDate)
-        index("idx_alloc_hist_uid_date", false, uid, serviceDate)
-    }
-}
-
 object AllocationChanges : Table("allocation_changes") {
     val id = integer("id").autoIncrement()
     val coreId = varchar("core_id", 20)
@@ -216,9 +177,34 @@ object AllocationLegs : Table("allocation_legs") {
     val destTime = varchar("dest_time", 5).nullable()
     val updatedAt = datetime("updated_at")
 
-    override val primaryKey = PrimaryKey(coreId, allocationSeq, name = "pk_allocation_legs")
+    override val primaryKey = PrimaryKey(coreId, serviceDate, allocationSeq, name = "pk_allocation_legs")
 
     init {
         index("idx_alloc_legs_uid_date", false, uid, serviceDate)
     }
+}
+
+/**
+ * One row per service per day. Main columns hold the latest snapshot; first_*
+ * holds the day's first snapshot. Initially built by scripts/migrate_allocation_days.py and kept current
+ * by Allocations.upsertLocked. Deliberately NOT in Schema.exposedTables: it was created
+ * by raw SQL without a named PK or CHECK constraints, so Exposed's migration would try to
+ * recreate it every startup. It is registered in Schema.rawTables instead.
+ */
+object AllocationDays : Table("allocation_days") {
+    val coreId = varchar("core_id", 20)
+    val serviceDate = varchar("service_date", 10)
+    val headcode = varchar("headcode", 6)
+    val operator = varchar("operator", 10)
+    val vehicles = varchar("vehicles", 2000)
+    val units = varchar("units", 500).default("")
+    val unitCount = integer("unit_count").default(0)
+    val updatedAt = datetime("updated_at")
+    val uid = varchar("uid", 10).nullable()
+    val firstVehicles = varchar("first_vehicles", 2000)
+    val firstUnits = varchar("first_units", 500).default("")
+    val firstUnitCount = integer("first_unit_count").default(0)
+    val firstRecordedAt = datetime("first_recorded_at")
+
+    override val primaryKey = PrimaryKey(coreId, serviceDate, name = "pk_allocation_days")
 }
