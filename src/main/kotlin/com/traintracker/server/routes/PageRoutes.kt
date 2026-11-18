@@ -46,6 +46,8 @@ fun Route.pageRoutes() {
         "/service/{serviceId}/{date}",
         "/unit/{unitCode}",
         "/unit/{unitCode}/{date}",
+        "/class/{classCode}",
+        "/class/{classCode}/{date}",
         "/toc/{tocCode}",
         "/toc/{tocCode}/{date}",
         "/headcode/{hc}",

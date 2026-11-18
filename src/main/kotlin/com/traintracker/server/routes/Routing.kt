@@ -233,6 +233,12 @@ private fun Route.boardRoutes() {
         val services = withContext(Dispatchers.IO) { queryByUnit(unit.filter { it.isLetterOrDigit() }, date) }
         call.respondSearch(unit, "UNIT", services, date, "No services found for unit $unit")
     }
+    get("/unitclass/{prefix}") {
+        val prefix = call.pathParam("prefix").uppercase().filter { it.isLetterOrDigit() }
+        if (prefix.length < 2) return@get call.respond(HttpStatusCode.BadRequest, "prefix too short")
+        val date = call.dateParam()
+        call.respond(withContext(Dispatchers.IO) { unitClassesInUse(prefix, date) })
+    }
 }
 
 // ---- Live train positions from LINX -------------------------------------------------------------------

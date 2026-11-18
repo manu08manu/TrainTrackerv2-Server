@@ -248,3 +248,21 @@ private fun annotateUnitDay(svc: ServiceResponse, day: List<ServiceResponse>, sv
     }
     return result
 }
+
+/** Class of a unit number: 3 digits for 6-digit units (360101 -> 360), 2 for 5-digit locos (66001 -> 66). */
+internal fun unitClass(unit: String) = if (unit.length >= 6) unit.take(3) else unit.take(2)
+
+/** Units with an allocation on [date] whose number starts with [prefix], grouped by class. */
+internal fun unitClassesInUse(prefix: String, date: String): List<UnitClassResponse> = transaction {
+    val units = sortedSetOf<String>()
+    query(
+        "SELECT DISTINCT units FROM allocation_consists WHERE service_date = ? AND units LIKE '%' || ? || '%'",
+        listOf(date, prefix)
+    ) { rs ->
+        while (rs.next()) {
+            val csv = rs.getString("units") ?: continue
+            csv.csvList().filterTo(units) { it.startsWith(prefix) }
+        }
+    }
+    units.groupBy { unitClass(it) }.map { (cls, list) -> UnitClassResponse(cls, list.size, list) }
+}
