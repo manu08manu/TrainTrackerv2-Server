@@ -35,6 +35,14 @@ internal enum class BoardMode { DEPARTURES, ARRIVALS, ALL }
 /** Whether to keep services whose call here is after midnight relative to their own origin ("rolled over"). */
 internal enum class RolledFilter { ANY, ONLY, EXCLUDE }
 
+private data class BoardLastReport(
+    val stanox: String,
+    val crs: String?,
+    val eventType: String,
+    val actualTime: String,
+    val delayMinutes: Int?
+)
+
 private val BOARD_COLUMNS = listOf(
     Schedules.uid, Schedules.headcode, Schedules.scheduledTime, Schedules.platform, Schedules.isPass, Schedules.stopType,
     Schedules.stpIndicator, Schedules.crs, Schedules.tiploc, Schedules.originTiploc, Schedules.destTiploc,
@@ -328,6 +336,7 @@ private fun JdbcTransaction.boardServices(
     val moveReasons = mutableMapOf<String, String?>()
     val lastDelay = mutableMapOf<String, Int>()   // uid -> minutes late at its latest reported call
     val running = mutableSetOf<String>()          // uids with any reported (not cancelled) movement
+    val lastReports = mutableMapOf<String, BoardLastReport>()
     if (uids.isNotEmpty()) {
         try {
             val args = uids.toList() + serviceDayArgs(date)
@@ -340,17 +349,40 @@ private fun JdbcTransaction.boardServices(
                 while (rs.next()) cancelledOnlyTrainId[rs.getString("uid") ?: continue] = rs.getString("train_id") ?: continue
             }
             query(
-                "SELECT uid, train_id, scheduled_time, actual_time, is_cancelled, cancel_reason, event_type FROM movements WHERE uid IN (${placeholders(uids.size)}) AND ${serviceDaySql("event_ts")} ORDER BY event_ts DESC",
+                "SELECT uid, train_id, stanox, crs, scheduled_time, actual_time, is_cancelled, cancel_reason, event_type FROM movements WHERE uid IN (${placeholders(uids.size)}) AND ${serviceDaySql("event_ts")} ORDER BY event_ts DESC",
                 args
             ) { rs ->
                 while (rs.next()) {
                     val uid = rs.getString("uid")?.takeIf { it.isNotEmpty() } ?: continue
                     val expectedTrainId = cancelledOnlyTrainId[uid]
                     if (expectedTrainId != null && (rs.getString("train_id") ?: "") != expectedTrainId) continue
-                    val scht = rs.getString("scheduled_time") ?: continue
+                    val scht = rs.getString("scheduled_time")
                     val actualTime = rs.getString("actual_time") ?: ""
                     val isCancelled = rs.getBoolean("is_cancelled")
                     val reasonCode = rs.getString("cancel_reason")
+                    val eventType = rs.getString("event_type") ?: ""
+
+                    // The query is newest-first, so the first genuine movement
+                    // with a usable STANOX is the latest confirmed train position.
+                    if (!isCancelled && actualTime.isNotEmpty() &&
+                        eventType in setOf("ARRIVAL", "DEPARTURE") &&
+                        uid !in lastReports
+                    ) {
+                        val stanox = rs.getString("stanox")?.takeIf { it.isNotBlank() }
+                        if (stanox != null) {
+                            lastReports[uid] = BoardLastReport(
+                                stanox = stanox,
+                                crs = rs.getString("crs")?.takeIf { it.isNotBlank() },
+                                eventType = eventType,
+                                actualTime = actualTime,
+                                delayMinutes = scht?.takeIf { it.isNotBlank() }
+                                    ?.let { minutesLate(actualTime, it) }
+                            )
+                        }
+                    }
+
+                    if (scht == null) continue
+
                     val entry = Triple(actualTime, isCancelled, ReasonCodes.resolve(reasonCode))
                     val stopKey = "$uid|$scht"
                     moves.putIfAbsent(stopKey, entry)
@@ -370,6 +402,32 @@ private fun JdbcTransaction.boardServices(
         } catch (e: Exception) {
         }
     }
+    // Resolve all reported STANOX codes in one lookup.
+    // Manual location overrides take precedence over current PIF names.
+    // Deliberately do not fall back to CIF-derived names.
+    val reportNames = mutableMapOf<String, String>()
+    val reportStanoxes = lastReports.values.map { it.stanox }.distinct()
+
+    if (reportStanoxes.isNotEmpty()) {
+        val ph = placeholders(reportStanoxes.size)
+        query(
+            "SELECT stanox, tiploc, name FROM (" +
+                "SELECT stanox, tiploc, name, 0 AS p FROM location_overrides " +
+                "WHERE stanox IN ($ph) AND name IS NOT NULL AND TRIM(name) != '' " +
+                "UNION ALL " +
+                "SELECT stanox, tiploc, name, 1 FROM pif_loc " +
+                "WHERE stanox IN ($ph) AND name IS NOT NULL AND TRIM(name) != ''" +
+                ") ORDER BY p, LENGTH(name), tiploc",
+            reportStanoxes + reportStanoxes
+        ) { rs ->
+            while (rs.next()) {
+                val stanox = rs.getString(1) ?: continue
+                val name = rs.getString(3)?.takeIf { it.isNotBlank() } ?: continue
+                reportNames.putIfAbsent(stanox, name)
+            }
+        }
+    }
+
     val overrides = originDestOverrides(uids, date)
     val darwinDb = AppDatabase.darwinPlatforms(uids, date)
     val movementPlatforms = AppDatabase.movementPlatforms(uids, date)
@@ -396,6 +454,7 @@ private fun JdbcTransaction.boardServices(
             return@mapNotNull null
         }
         val delay = lastDelay[uid]
+        val latestReport = lastReports[uid]
         val predicted = actualTime.isEmpty() && !isCancelled && delay != null && delay > 0
         val (platform, confirmed) = resolvePlatform(
             uid, row[Schedules.tiploc], row[Schedules.crs], row[Schedules.platform], darwinDb[uid to row[Schedules.tiploc]], movementPlatforms
@@ -415,6 +474,12 @@ private fun JdbcTransaction.boardServices(
             isRunning = uid in running,
             link = "/?service=$uid&crs=$safeCrs&date=$date",
             serviceDate = date,
+            lastReportLocation = latestReport?.let {
+                reportNames[it.stanox] ?: it.crs ?: it.stanox
+            },
+            lastReportTime = latestReport?.actualTime,
+            lastReportEventType = latestReport?.eventType,
+            lastReportDelayMinutes = latestReport?.delayMinutes,
         )
     }.withResolvedNames()
     // Order by the time shown: scheduled when cancelled, else actual or predicted.

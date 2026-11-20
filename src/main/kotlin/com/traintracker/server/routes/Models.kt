@@ -79,7 +79,11 @@ data class ServiceResponse(
     /** The train has reported a movement on this service day. */
     val isRunning: Boolean = false,
     val link: String? = null,
-    val serviceDate: String = ""
+    val serviceDate: String = "",
+    val lastReportLocation: String? = null,
+    val lastReportTime: String? = null,
+    val lastReportEventType: String? = null,
+    val lastReportDelayMinutes: Int? = null
 )
 
 @Serializable
