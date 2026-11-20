@@ -56,6 +56,10 @@ internal fun scheduledServiceResponse(
     isRunning: Boolean = false,
     link: String? = null,
     serviceDate: String = "",
+    lastReportLocation: String? = null,
+    lastReportTime: String? = null,
+    lastReportEventType: String? = null,
+    lastReportDelayMinutes: Int? = null,
 ): ServiceResponse = ServiceResponse(
     uid = row[Schedules.uid],
     headcode = row[Schedules.headcode],
@@ -78,6 +82,10 @@ internal fun scheduledServiceResponse(
     isRunning = isRunning,
     link = link,
     serviceDate = serviceDate,
+    lastReportLocation = lastReportLocation,
+    lastReportTime = lastReportTime,
+    lastReportEventType = lastReportEventType,
+    lastReportDelayMinutes = lastReportDelayMinutes,
 )
 
 // ---- Platforms ----------------------------------------------------------------------------------------
