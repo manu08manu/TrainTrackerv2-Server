@@ -33,6 +33,7 @@ import io.ktor.server.plugins.compression.gzip
 import io.ktor.server.plugins.conditionalheaders.ConditionalHeaders
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.plugins.cors.routing.CORS
+import io.ktor.server.plugins.forwardedheaders.XForwardedHeaders
 import io.ktor.server.plugins.statuspages.StatusPages
 import io.ktor.server.request.path
 import io.ktor.server.response.respond
@@ -81,13 +82,17 @@ private fun Application.configure() {
             if (call.request.path().startsWith("/css/")) CachingOptions(cacheControl = CacheControl.MaxAge(maxAgeSeconds = 86400)) else null
         }
     }
+    install(XForwardedHeaders)
     install(CORS) {
         allowMethod(HttpMethod.Get)
         allowMethod(HttpMethod.Post)
+        allowMethod(HttpMethod.Put)
+        allowMethod(HttpMethod.Delete)
         allowHeader(HttpHeaders.Authorization)
         allowHeader(HttpHeaders.ContentType)
-        anyHost()
+        allowHost("traintracker.jaisal.net", schemes = listOf("https"))
     }
+
     install(StatusPages) {
         exception<IllegalArgumentException> { call, cause ->
             call.respond(HttpStatusCode.BadRequest, mapOf("error" to (cause.message ?: "Bad request")))
