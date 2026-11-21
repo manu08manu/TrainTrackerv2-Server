@@ -157,12 +157,24 @@ object AppDatabase {
         }
     }
 
-    /** Moves a train's last known location to its new headcode after a change of identity. */
-    fun transferLocation(oldHeadcode: String, newHeadcode: String, rid: String) {
+    /** Moves a train's last known location to its new headcode after a change of identity.
+     *  Falls back to a rid-only lookup when (oldHeadcode, rid) misses: ReferenceOTN is the
+     *  originally planned id, not the immediate predecessor, so on a second S515 it points at
+     *  the wrong headcode. Returns the headcode actually transferred from (null if none). */
+    fun transferLocation(oldHeadcode: String, newHeadcode: String, rid: String): String? {
+        var priorOut: String? = null
         transaction {
-            val existing = TrainLocations.selectAll()
+            val byOld = TrainLocations.selectAll()
                 .where { (TrainLocations.headcode eq oldHeadcode) and (TrainLocations.rid eq rid) }
-                .singleOrNull() ?: return@transaction
+                .singleOrNull()
+            val existing = byOld ?: rid.takeIf { it.isNotEmpty() }?.let { r ->
+                TrainLocations.selectAll()
+                    .where { TrainLocations.rid eq r }
+                    .toList()
+                    .maxByOrNull { it[TrainLocations.updatedAt] }
+            } ?: return@transaction
+            val prior = existing[TrainLocations.headcode]
+            priorOut = prior
             TrainLocations.upsert {
                 it[TrainLocations.headcode] = newHeadcode
                 it[TrainLocations.rid] = rid
@@ -172,9 +184,12 @@ object AppDatabase {
                 it[TrainLocations.eventType] = existing[TrainLocations.eventType]
                 it[TrainLocations.updatedAt] = existing[TrainLocations.updatedAt]
             }
-            TrainLocations.deleteWhere { (TrainLocations.headcode eq oldHeadcode) and (TrainLocations.rid eq rid) }
+            if (prior != newHeadcode) {
+                TrainLocations.deleteWhere { (TrainLocations.headcode eq prior) and (TrainLocations.rid eq rid) }
+            }
         }
-        log.info("transferLocation: $oldHeadcode -> $newHeadcode (rid=$rid)")
+        priorOut?.let { log.info("transferLocation: $it -> $newHeadcode (rid=$rid)") }
+        return priorOut
     }
 
     fun saveHeadcodeAlias(oldHeadcode: String, newHeadcode: String, uid: String = "") {

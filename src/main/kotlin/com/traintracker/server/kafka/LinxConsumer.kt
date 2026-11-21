@@ -244,10 +244,18 @@ object LinxConsumer {
                 is LinxMovement -> LinxMovementWriter.movement(
                     p.trainId, p.uid, p.headcode, p.stanox, p.crs, p.eventType, ukTime(p.bookedTs), ukTime(p.actualTs), p.delay
                 )?.let(rows::add)
-                is LinxActivation -> LinxMovementWriter.activation(p.trainId, p.uid, p.originStanox)
+                is LinxActivation -> {
+                    LinxMovementWriter.activation(p.trainId, p.uid, p.originStanox)
+                    if (p.originChanged && p.originTiploc != null) LinxMovementWriter.changeOfOrigin(
+                        p.trainId, p.uid, p.headcode, p.startDate, p.originTiploc, p.originStanox, null, ::stanoxFor
+                    )
+                }
                 is LinxModification -> when (p.kind) {
-                    "CANCELLATION", "CANCELLATION_EN_ROUTE" -> LinxMovementWriter.cancellation(
+                    "CANCELLATION" -> LinxMovementWriter.cancellation(
                         p.trainId, p.uid, p.headcode, p.stanox, LinxClock.ukClock(p.time, p.startDate, labelsUkTime), p.reason
+                    )
+                    "CANCELLATION_EN_ROUTE" -> LinxMovementWriter.terminateShort(
+                        p.trainId, p.uid, p.headcode, p.startDate, p.tiploc, p.stanox, p.reason, ::stanoxFor
                     )
                     "CHANGE_OF_IDENTITY" -> p.previousHeadcode?.let { LinxMovementWriter.changeOfIdentity(p.trainId, p.uid, it, p.headcode) }
                     "REINSTATEMENT" -> LinxMovementWriter.reinstatement(

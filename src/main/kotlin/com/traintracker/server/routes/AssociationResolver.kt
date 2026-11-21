@@ -48,7 +48,8 @@ data class AssociationContext(
     val assocAllStops: Map<String, Set<String>>,
     val svcTermini: Map<String, String>,
     val assocOriginTimes: Map<String, String>,
-    val assocUnits: Map<String, Set<String>>
+    val assocUnits: Map<String, Set<String>>,
+    val cancelledTiplocs: Map<String, Set<String>> = emptyMap()
 )
 
 fun JdbcTransaction.buildAssociationContext(uids: Set<String>, date: String = LocalDate.now().toString()): AssociationContext {
@@ -64,6 +65,7 @@ fun JdbcTransaction.buildAssociationContext(uids: Set<String>, date: String = Lo
     val svcTermini = mutableMapOf<String, String>()
     val assocOriginTimes = mutableMapOf<String, String>()
     val assocUnits = Allocations.unitsForUids(allAssocUids + uids, date)
+    val cancelledTiplocs = loadCancelledTiplocs(allAssocUids + uids, date)
     if (allAssocUids.isNotEmpty()) {
         query(
             "SELECT uid, headcode, tiploc, stop_type, stp_indicator, scheduled_time FROM schedules WHERE uid IN (${placeholders(allAssocUids.size)}) AND stp_indicator != 'C' AND $SCHEDULE_DATE_SCOPE_SQL ORDER BY CASE stp_indicator WHEN 'N' THEN 0 WHEN 'O' THEN 1 WHEN 'P' THEN 2 ELSE 3 END",
@@ -100,7 +102,7 @@ fun JdbcTransaction.buildAssociationContext(uids: Set<String>, date: String = Lo
     }
     return AssociationContext(
         assocMap, reverseAssocMap, assocHeadcodes, assocEffectiveLos, assocOriginTiplocs, assocDestTiplocs,
-        assocAllStops, svcTermini, assocOriginTimes, assocUnits
+        assocAllStops, svcTermini, assocOriginTimes, assocUnits, cancelledTiplocs
     )
 }
 
@@ -166,7 +168,10 @@ private fun unitsCompatible(mine: Set<String>, theirs: Set<String>): Boolean {
  * Adds association details to a service: the portions it divides into (VV), the train it joins or is joined by
  * (JJ/NP mid-journey), what it forms at its terminus, and the train it split from.
  */
-fun applyAssociations(svc: ServiceResponse, ctx: AssociationContext, date: String = LocalDate.now().toString()): ServiceResponse {
+fun applyAssociations(svc: ServiceResponse, ctx: AssociationContext, date: String = LocalDate.now().toString()): ServiceResponse =
+    ctx.pruneCancelled(applyAssociationsRaw(svc, ctx, date))
+
+private fun applyAssociationsRaw(svc: ServiceResponse, ctx: AssociationContext, date: String): ServiceResponse {
     val uid = svc.uid
     var formsUid2: String? = null
     var formsHeadcode2: String? = null
