@@ -21,6 +21,8 @@ internal data class LinxMovement(
 internal data class LinxActivation(
     val trainId: String, val uid: String, val headcode: String, val startDate: String,
     val originTiploc: String?, val originStanox: String?, val originTime: String?, override val receivedMs: Long,
+    /** S509 network parameter ASM = 1: activated with a change of origin from the schedule. */
+    val originChanged: Boolean = false,
 ) : LinxMessage()
 
 /** S513 cancellation / change of origin / reinstatement, or S515 change of identity. */
@@ -120,13 +122,15 @@ internal class LinxParser(
         // The first PlannedJourneyLocation is the origin; the UID is a NetworkSpecificParameter.
         val origin = root.first("PlannedJourneyLocation")
         var uid = ids.uid
+        var asmChanged = false
         val params = root.getElementsByTagName("NetworkSpecificParameter")
         for (i in 0 until params.length) {
             val p = params.item(i) as? Element ?: continue
             if (p.text("Name") == "UID") p.text("Value")?.takeIf { it.all(Char::isLetterOrDigit) }?.let { uid = it }
+            if (p.text("Name") == "ASM") asmChanged = p.text("Value") == "1"
         }
         val tiploc = tiplocIn(origin)
-        return LinxActivation(ids.trainId, uid, ids.headcode, ids.startDate, tiploc, tiploc?.let(stanoxOf), origin?.text("Time"), receivedMs)
+        return LinxActivation(ids.trainId, uid, ids.headcode, ids.startDate, tiploc, tiploc?.let(stanoxOf), origin?.text("Time"), receivedMs, originChanged = asmChanged)
     }
 
     private fun modification(root: Element, ids: Ids, receivedMs: Long): LinxModification {

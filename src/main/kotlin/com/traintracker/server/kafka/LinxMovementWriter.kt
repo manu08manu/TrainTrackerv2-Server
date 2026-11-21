@@ -62,7 +62,8 @@ internal object LinxMovementWriter {
         AppDatabase.saveTrainActivation(trainId, uid, originStanox)
     }
 
-    /** S513 91/92: a cancellation at [stanox]; readers carry it on to later stops, as with TRUST. */
+    /** S513 91: a cancellation at [stanox]; readers carry it on to later stops, as with TRUST.
+     *  Also used by 92, but at the first scheduled stop *after* the new terminus, not at the terminus itself. */
     fun cancellation(trainId: String, uid: String, headcode: String, stanox: String?, time: String, reason: String?) {
         if (stanox == null) return
         AppDatabase.batchUpsertMovements(
@@ -73,6 +74,51 @@ internal object LinxMovementWriter {
                 )
             )
         )
+    }
+
+    /**
+     * S513 92: the train terminates at [tiploc] (the new destination) instead of its scheduled terminus.
+     * The 92 location is NOT cancelled — the train arrives there. Stops scheduled after it are cancelled by
+     * writing a single propagating CANCELLATION at the first non-pass stop beyond [tiploc], reusing the same
+     * reader behaviour as 91. If there is no such stop, nothing is written (the train terminates as booked).
+     */
+    fun terminateShort(
+        trainId: String, uid: String, headcode: String, startDate: String, tiploc: String?, stanox: String?, reason: String?,
+        stanoxOf: (String) -> String?,
+    ) {
+        val resolvedUid = uid.ifEmpty { trainIdToRid[trainId] ?: "" }
+        if (resolvedUid.isEmpty() || tiploc == null) {
+            log.warn("LINX terminate short: $headcode ($resolvedUid) no tiploc to look up; no cancellation written")
+            return
+        }
+        try {
+            val date = startDate.takeIf { it.length == 10 } ?: java.time.LocalDate.now().toString()
+            val nextStop = transaction {
+                val rows = Schedules.selectAll()
+                    .where { (Schedules.uid eq resolvedUid) and scheduleDateScope(effectiveDateFor(date)) }
+                    .toList()
+                val best = rows.minOfOrNull { STP_RANK[it[Schedules.stpIndicator]] ?: 99 } ?: return@transaction null
+                if (best == STP_RANK['C']) return@transaction null
+                val run = rows.filter { (STP_RANK[it[Schedules.stpIndicator]] ?: 99) == best }.sortedBy { it[Schedules.stopSequence] }
+                val cutIdx = run.indexOfFirst { it[Schedules.tiploc] == tiploc || (stanox != null && stanoxOf(it[Schedules.tiploc]) == stanox) }
+                if (cutIdx < 0) return@transaction null
+                run.drop(cutIdx + 1).firstOrNull { !it[Schedules.isPass] }
+            }
+            if (nextStop == null) {
+                log.info("LINX terminate short: $headcode ($resolvedUid) terminates at $tiploc with no further scheduled stops")
+                return
+            }
+            val nextTiploc = nextStop[Schedules.tiploc]
+            val stopStanox = stanoxOf(nextTiploc)
+            if (stopStanox == null) {
+                log.warn("LINX terminate short: $headcode ($resolvedUid) no STANOX for $nextTiploc after $tiploc")
+                return
+            }
+            cancellation(trainId, resolvedUid, headcode, stopStanox, nextStop[Schedules.scheduledTime], reason)
+            log.info("LINX terminate short: $headcode ($resolvedUid) terminates at $tiploc; cancels from $nextTiploc")
+        } catch (e: Exception) {
+            log.warn("LINX terminate short failed for $headcode: ${e.message}")
+        }
     }
 
     /** S513 96: undoes cancellations at that scheduled time and records the reinstatement. */
@@ -142,12 +188,14 @@ internal object LinxMovementWriter {
     fun changeOfIdentity(trainId: String, uid: String, oldHeadcode: String, newHeadcode: String) {
         if (oldHeadcode.length != 4 || newHeadcode.length != 4 || oldHeadcode == newHeadcode) return
         val resolvedUid = uid.ifEmpty { trainIdToRid[trainId] ?: "" }
-        transaction {
-            AppDatabase.saveHeadcodeAlias(oldHeadcode, newHeadcode, resolvedUid)
-            AppDatabase.transferLocation(oldHeadcode, newHeadcode, resolvedUid)
+        val actualPrior = transaction {
+            AppDatabase.transferLocation(oldHeadcode, newHeadcode, resolvedUid).also { prior ->
+                setOfNotNull(oldHeadcode, prior).filter { it != newHeadcode }
+                    .forEach { AppDatabase.saveHeadcodeAlias(it, newHeadcode, resolvedUid) }
+            }
         }
-        trainLocations.remove("$oldHeadcode|$resolvedUid")?.let { trainLocations["$newHeadcode|$resolvedUid"] = it.copy(headcode = newHeadcode) }
-        log.info("LINX change of identity: $oldHeadcode -> $newHeadcode ($resolvedUid)")
+        trainLocations.remove("${actualPrior ?: oldHeadcode}|$resolvedUid")?.let { trainLocations["$newHeadcode|$resolvedUid"] = it.copy(headcode = newHeadcode) }
+        log.info("LINX change of identity: ${actualPrior ?: oldHeadcode} -> $newHeadcode ($resolvedUid)")
     }
 
     /** Copies a TD platform onto the matching movement row. Call inside a transaction. */

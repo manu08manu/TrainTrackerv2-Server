@@ -176,14 +176,21 @@ fun Route.serviceDetailRoutes() {
 // ---- Calling points ------------------------------------------------------------------------------------
 
 /**
- * The headcode a train runs under now, after a change of identity (the alias table has no date, so an alias
- * applies from the start of its service date to 30 hours after it). The timetable keeps the old headcode.
+ * The headcode a train runs under now, after a change of identity. The S515 record in linx_modifications carries
+ * the service date it applies to, so a change received the evening before the service date still counts.
+ * Falls back to the undated alias table (alias applies from the start of its service date to 30 hours after it).
+ * The timetable keeps the old headcode.
  */
 private fun JdbcTransaction.currentHeadcode(uid: String, svcDate: String, scheduled: String): String =
     queryFirst(
-        "SELECT new_headcode FROM headcode_aliases WHERE uid = ? AND old_headcode = ? AND updated_at >= ? AND updated_at < datetime(?, '+30 hours')",
-        listOf(uid, scheduled, svcDate, svcDate)
-    ) { it.getString(1) } ?: scheduled
+        "SELECT headcode FROM linx_modifications WHERE uid = ? AND start_date = ? AND code = '07' AND headcode != '' ORDER BY received_ms DESC LIMIT 1",
+        listOf(uid, svcDate)
+    ) { it.getString(1) }
+        ?: queryFirst(
+            "SELECT new_headcode FROM headcode_aliases WHERE uid = ? AND old_headcode = ? AND updated_at >= ? AND updated_at < datetime(?, '+30 hours')",
+            listOf(uid, scheduled, svcDate, svcDate)
+        ) { it.getString(1) }
+        ?: scheduled
 
 /** The calling points of a service on a date, with live times, cancellations, delays, platforms and TD-only points. */
 private fun JdbcTransaction.serviceRoute(uid: String, atCrs: String, svcDate: String): ServiceRoute {
