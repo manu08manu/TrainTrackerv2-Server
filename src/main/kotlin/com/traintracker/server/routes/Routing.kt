@@ -47,6 +47,7 @@ fun Application.configureRoutes() {
         staticFiles("/css", File("${Config.DATA_DIR}/static/css"))
         staticFiles("/js", File("${Config.DATA_DIR}/static/js"))
         staticFiles("/icons", File("${Config.DATA_DIR}/static/icons"))
+        staticFiles("/fonts", File("${Config.DATA_DIR}/static/fonts"))
         route("/api") {
             authRoutes()
             adminRoutes()
