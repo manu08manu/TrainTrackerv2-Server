@@ -1,4 +1,4 @@
-package com.traintracker.server.cif
+package com.traintracker.server.reference
 
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
@@ -17,10 +17,10 @@ import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 import org.json.JSONObject
 import org.slf4j.LoggerFactory
 
-private val log = LoggerFactory.getLogger("CifParser")
+private val log = LoggerFactory.getLogger("ScheduleParser")
 
 /** One stop of a schedule, as stored in the schedules table. */
-data class CifStop(
+data class ScheduleStop(
     val uid: String,
     val headcode: String,
     val tsc: String = "",
@@ -46,7 +46,7 @@ data class CifStop(
 )
 
 /** Inserts stops into schedules; call inside a transaction. */
-fun insertStops(stops: List<CifStop>, scheduleDate: (CifStop) -> String) {
+fun insertStops(stops: List<ScheduleStop>, scheduleDate: (ScheduleStop) -> String) {
     Schedules.batchInsert(stops, ignore = true) { s ->
         this[Schedules.uid] = s.uid
         this[Schedules.headcode] = s.headcode
@@ -74,11 +74,11 @@ fun insertStops(stops: List<CifStop>, scheduleDate: (CifStop) -> String) {
     }
 }
 
-object CifParser {
+object ScheduleParser {
 
-    /** One schedule location, read from either the CIF or the VSTP JSON layout. */
+    /** One schedule location, read from either the full-schedule or the VSTP JSON layout. */
     private class RawLocation(
-        val type: String,   // LO, LI or LT; "" when the CIF leaves it blank
+        val type: String,   // LO, LI or LT; "" when the schedule leaves it blank
         val tiploc: String,
         val publicDep: String,
         val publicArr: String,
@@ -91,7 +91,7 @@ object CifParser {
     private fun platformOf(loc: JSONObject): String? =
         loc.optString("CIF_platform", "").trim().ifEmpty { loc.optString("platform", "").trim() }.ifEmpty { null }
 
-    private fun cifLocation(loc: JSONObject) = RawLocation(
+    private fun fullScheduleLocation(loc: JSONObject) = RawLocation(
         type = loc.optString("location_type", ""),
         tiploc = loc.optString("tiploc_code", "").trim(),
         publicDep = loc.optString("public_departure", "").trim(),
@@ -120,13 +120,13 @@ object CifParser {
         )
     }
 
-    fun parseVstpSchedule(sched: JSONObject): List<CifStop> = parseSchedule(sched, LocalDate.now(), vstp = true)
+    fun parseVstpSchedule(sched: JSONObject): List<ScheduleStop> = parseSchedule(sched, LocalDate.now(), vstp = true)
 
     /**
      * Stops of a schedule valid today. Cancellations ('C') and deletes give no stops. A VSTP schedule must also
-     * run on today's weekday and keeps the default days_run; a CIF schedule stores its own days_run.
+     * run on today's weekday and keeps the default days_run; a full-schedule entry stores its own days_run.
      */
-    private fun parseSchedule(sched: JSONObject, today: LocalDate, vstp: Boolean): List<CifStop> {
+    private fun parseSchedule(sched: JSONObject, today: LocalDate, vstp: Boolean): List<ScheduleStop> {
         val stpIndicator = sched.optString("CIF_stp_indicator", "").firstOrNull() ?: return emptyList()
         if (stpIndicator == 'C') return emptyList()
         if (sched.optString("transaction_type", "") == "Delete") return emptyList()
@@ -149,7 +149,7 @@ object CifParser {
         val locs = seg.optJSONArray("schedule_location") ?: return emptyList()
         if (locs.length() == 0) return emptyList()
 
-        val locations = List(locs.length()) { i -> locs.optJSONObject(i)?.let { if (vstp) vstpLocation(it) else cifLocation(it) } }
+        val locations = List(locs.length()) { i -> locs.optJSONObject(i)?.let { if (vstp) vstpLocation(it) else fullScheduleLocation(it) } }
         val originTiploc = locations.lastOrNull { it?.type == "LO" }?.tiploc ?: ""
         val destTiploc = locations.lastOrNull { it?.type == "LT" }?.tiploc ?: ""
         val originCrs = CorpusLookup.crsFromTiploc(originTiploc)
@@ -170,7 +170,7 @@ object CifParser {
                 else -> ""
             }
             if (schedTime.isEmpty() && loc.type != "LT") return@mapIndexedNotNull null
-            CifStop(
+            ScheduleStop(
                 uid = uid,
                 headcode = headcode,
                 tsc = tsc,
@@ -204,7 +204,7 @@ object CifParser {
     }
 
     /**
-     * Loads the CIF file into schedules (valid today), associations and cancellation windows. A first pass
+     * Loads the schedule file into schedules (valid today), associations and cancellation windows. A first pass
      * collects the current TIPLOCs, which LocationData needs before CRS codes are looked up for the stops.
      */
     fun parseAndPersist(gzipFile: File): Int {
@@ -222,10 +222,10 @@ object CifParser {
             }
         }
         ScheduleCancellations.begin()
-        LocationData.onCif(tiplocs)
+        LocationData.onSchedule(tiplocs)
 
         val today = LocalDate.now()
-        val buffer = mutableListOf<CifStop>()
+        val buffer = mutableListOf<ScheduleStop>()
         var total = 0
         var scheduleCount = 0
         var validCount = 0
@@ -252,7 +252,7 @@ object CifParser {
         }
         flush()
         ScheduleCancellations.persist()
-        log.info("CIF JSON: $scheduleCount schedules, $validCount run today → $total stops")
+        log.info("Schedule JSON: $scheduleCount schedules, $validCount run today → $total stops")
 
         val associations = associationLines.mapNotNull { line ->
             try {
@@ -262,7 +262,7 @@ object CifParser {
             }
         }
         AppDatabase.replaceAssociations(associations)
-        log.info("CIF associations: ${associations.size} parsed and stored")
+        log.info("Schedule associations: ${associations.size} parsed and stored")
         return total
     }
 
@@ -306,55 +306,55 @@ object CifParser {
     }
 }
 
-/** Imports the daily RDM full CIF JSON into the schedules table. */
+/** Imports the daily RDM full schedule JSON into the schedules table. */
 object ScheduleImporter {
     /** Returns true when the import could not run yet and the caller should retry soon. */
     fun importIfNeeded(): Boolean {
-        val source = File(Config.cifSourcePath)
+        val source = File(Config.scheduleSourcePath)
         if (!source.exists()) {
-            log.warn("CIF source missing: ${source.path} — skipping import")
+            log.warn("Schedule source missing: ${source.path} — skipping import")
             return true
         }
         val sourceMtime = source.lastModified()
         val ageMs = System.currentTimeMillis() - sourceMtime
         if (ageMs < 5 * 60_000) {
-            log.info("CIF source modified <5 min ago — waiting")
+            log.info("Schedule source modified <5 min ago — waiting")
             return true
         }
         if (ageMs > 36 * 3_600_000L) {
-            log.warn("CIF source is ${ageMs / 3_600_000}h old — RDM feed may have stopped")
+            log.warn("Schedule source is ${ageMs / 3_600_000}h old — RDM feed may have stopped")
         }
-        val lastImported = AppDatabase.getCifMeta("cif_source_mtime")?.toLongOrNull() ?: 0L
+        val lastImported = AppDatabase.getMeta("schedule_source_mtime")?.toLongOrNull() ?: 0L
         if (sourceMtime == lastImported) {
-            log.info("CIF source unchanged (mtime=$sourceMtime) — skipping import")
+            log.info("Schedule source unchanged (mtime=$sourceMtime) — skipping import")
             return false
         }
-        log.info("CIF import starting from ${source.path} (${source.length() / 1024 / 1024}MB)")
+        log.info("Schedule import starting from ${source.path} (${source.length() / 1024 / 1024}MB)")
 
-        // Copy → verify → atomically replace the cache. If anything fails, CIF_CACHE
+        // Copy → verify → atomically replace the cache. If anything fails, SCHEDULE_CACHE
         // still holds the previous full file, so the schedule table is never touched.
-        val tmp = File(Config.CIF_CACHE.path + ".tmp")
+        val tmp = File(Config.SCHEDULE_CACHE.path + ".tmp")
         try {
             source.copyTo(tmp, overwrite = true)
             if (source.lastModified() != sourceMtime) {
                 tmp.delete()
-                log.warn("CIF source changed during copy — retrying shortly")
+                log.warn("Schedule source changed during copy — retrying shortly")
                 return true
             }
             GZIPInputStream(FileInputStream(tmp)).use { it.copyTo(java.io.OutputStream.nullOutputStream()) }
-            Files.move(tmp.toPath(), Config.CIF_CACHE.toPath(), StandardCopyOption.REPLACE_EXISTING)
+            Files.move(tmp.toPath(), Config.SCHEDULE_CACHE.toPath(), StandardCopyOption.REPLACE_EXISTING)
         } catch (e: Exception) {
             tmp.delete()
-            log.error("CIF copy/verify failed (source=${source.path}): ${e.message}", e)
+            log.error("Schedule copy/verify failed (source=${source.path}): ${e.message}", e)
             return true
         }
 
         // VSTP ('N') schedules come from Kafka and survive the reload.
         transaction { exec("DELETE FROM schedules WHERE stp_indicator != 'N'") }
-        val count = CifParser.parseAndPersist(Config.CIF_CACHE)
-        AppDatabase.setCifMeta("cif_source_mtime", sourceMtime.toString())
-        AppDatabase.setCifMeta("last_download_date", LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE))
-        log.info("CIF import complete — $count stops inserted")
+        val count = ScheduleParser.parseAndPersist(Config.SCHEDULE_CACHE)
+        AppDatabase.setMeta("schedule_source_mtime", sourceMtime.toString())
+        AppDatabase.setMeta("last_download_date", LocalDate.now().format(DateTimeFormatter.ISO_LOCAL_DATE))
+        log.info("Schedule import complete — $count stops inserted")
         return false
     }
 }

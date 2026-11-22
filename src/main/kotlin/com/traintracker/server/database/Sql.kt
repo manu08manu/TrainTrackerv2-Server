@@ -106,7 +106,7 @@ private val effectiveDateCache = ConcurrentHashMap<String, Pair<Long, String>>()
 private const val EFFECTIVE_DATE_TTL_MS = 30_000L
 
 /**
- * The date whose timetable to use for [requested]. Only today can differ: until today's CIF has been
+ * The date whose timetable to use for [requested]. Only today can differ: until today's schedule has been
  * loaded, the most recently loaded date is used instead.
  */
 fun effectiveDateFor(requested: String): String {

@@ -1,7 +1,8 @@
 package com.traintracker.server.kafka
 
-import com.traintracker.server.cif.CorpusLookup
-import com.traintracker.server.cif.SmartLookup
+import com.traintracker.server.reference.CorpusLookup
+import com.traintracker.server.reference.SmartLookup
+import com.traintracker.server.database.movementServiceDate
 import com.traintracker.server.database.AppDatabase
 import com.traintracker.server.database.MovementBatch
 import com.traintracker.server.database.Schedules

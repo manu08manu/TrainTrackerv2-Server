@@ -1,4 +1,4 @@
-package com.traintracker.server.cif
+package com.traintracker.server.reference
 
 import com.traintracker.server.database.AppDatabase
 import com.traintracker.server.database.Overrides
@@ -65,7 +65,7 @@ object CorpusLookup {
     private var stanoxCrsOverrides: Map<String, String> = emptyMap()
     @Volatile
     private var stanoxTiplocOverrides: Map<String, String> = emptyMap()
-    private val tiplocToCifName = HashMap<String, String>(12000)
+    private val tiplocToFeedName = HashMap<String, String>(12000)
     private val noSmartTracker = MissingItemTracker("missing_smart_stanox", "stanox")
     private val crsToName = HashMap<String, String>(3000)
     @Volatile
@@ -157,12 +157,12 @@ object CorpusLookup {
         if (tsc.isNotEmpty() && tscToOperator[tsc] == null) missingTscTracker.record(tsc, headcode, uid)
     }
 
-    fun mergeCifNamesFromFeed(entries: Map<String, String>) {
-        tiplocToCifName.putAll(entries)
-        log.info("CorpusLookup: merged ${entries.size} CIF tps_description entries")
+    fun mergeNamesFromFeed(entries: Map<String, String>) {
+        tiplocToFeedName.putAll(entries)
+        log.info("CorpusLookup: merged ${entries.size} feed tps_description entries")
     }
 
-    fun nameFromTiploc(tiploc: String): String? = tiplocToName[tiploc] ?: tiplocToCifName[tiploc]
+    fun nameFromTiploc(tiploc: String): String? = tiplocToName[tiploc] ?: tiplocToFeedName[tiploc]
 
     fun namesFromTiplocs(tiplocs: Set<String>): Map<String, String?> = tiplocs.associateWith { nameFromTiploc(it) }
 

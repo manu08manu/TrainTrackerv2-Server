@@ -6,13 +6,13 @@ set -u
 DB=/opt/traintracker/traintracker.db
 REPORT=/home/opc/traintracker-backend/logs/tiploc_override_sweep.log
 F=/tmp/tiploc_sweep_daily.gz
-CACHE="${CACHE_OVERRIDE:-/opt/traintracker/cif_cache.gz}"
+CACHE="${CACHE_OVERRIDE:-/opt/traintracker/schedule_cache.gz}"
 GRACE_DAYS=30
 
 mkdir -p "$(dirname "$REPORT")"
 
-source "$(dirname "$0")/cif_cache.sh"
-download_cif_to "$CACHE" "$F" "$REPORT"
+source "$(dirname "$0")/schedule_cache.sh"
+download_schedule_to "$CACHE" "$F" "$REPORT"
 
 if [ ! -f "$F" ] || [ "$(stat -c%s "$F")" -lt 1000000 ]; then
     echo "$(date '+%F %T') download failed / cache missing - sweep skipped" >> "$REPORT"
@@ -27,7 +27,7 @@ import sqlite3
 import sys
 import datetime
 
-db_path, report_path, cif_path, grace_days = (
+db_path, report_path, schedule_path, grace_days = (
     sys.argv[1],
     sys.argv[2],
     sys.argv[3],
@@ -37,15 +37,15 @@ db_path, report_path, cif_path, grace_days = (
 stamp = datetime.datetime.now().strftime("%F %T")
 today = datetime.date.today()
 
-current_cif = set()
+current_tiplocs = set()
 
-with gzip.open(cif_path, "rt") as f:
+with gzip.open(schedule_path, "rt") as f:
     for line in f:
         if '"TiplocV1"' not in line:
             continue
 
         t = json.loads(line)["TiplocV1"]
-        current_cif.add(t["tiploc_code"].strip())
+        current_tiplocs.add(t["tiploc_code"].strip())
 
 con = sqlite3.connect(db_path)
 
@@ -69,7 +69,7 @@ con.execute("""
 
 restored, deleted, newly_missing, still_pending = [], [], [], []
 
-# Restore: a previously-archived TIPLOC that has reappeared in CIF.
+# Restore: a previously-archived TIPLOC that has reappeared in the schedule.
 # Writes back into location_overrides rather than re-inserting,
 # since nlc/stanme/stanox were never removed.
 
@@ -79,7 +79,7 @@ archived = con.execute("""
 """).fetchall()
 
 for tiploc, name, crs, changed_by, changed_at in archived:
-    if tiploc in current_cif:
+    if tiploc in current_tiplocs:
         con.execute(
             """
             UPDATE location_overrides
@@ -102,7 +102,7 @@ tracked_map = dict(con.execute("""
 """).fetchall())
 
 for tiploc in list(tracked_map):
-    if tiploc in current_cif:
+    if tiploc in current_tiplocs:
         con.execute(
             "DELETE FROM tiploc_missing_tracking WHERE tiploc = ?",
             (tiploc,)
@@ -125,7 +125,7 @@ overrides = con.execute("""
 
 missing = [
     row for row in overrides
-    if row[0] not in current_cif
+    if row[0] not in current_tiplocs
 ]
 
 for tiploc, name, crs, changed_by, changed_at in missing:
@@ -162,7 +162,7 @@ for tiploc, name, crs, changed_by, changed_at in missing:
 
             # Blank name/CRS rather than deleting the row.
             # NLC/stanme/stanox stay, matching how a removed
-            # override used to fall back to CIF.
+            # override used to fall back to the schedule.
 
             con.execute(
                 """
@@ -197,7 +197,7 @@ with open(report_path, "a") as r:
 
     if newly_missing:
         r.write(
-            f"{stamp}: {len(newly_missing)} newly missing from CIF, "
+            f"{stamp}: {len(newly_missing)} newly missing from the schedule, "
             f"grace period started: {', '.join(newly_missing)}\n"
         )
 
@@ -216,12 +216,12 @@ with open(report_path, "a") as r:
     if not restored and not newly_missing and not deleted and not still_pending:
         r.write(
             f"{stamp}: no changes ({len(overrides)} overrides checked "
-            f"against {len(current_cif)} CIF TIPLOCs)\n"
+            f"against {len(current_tiplocs)} schedule TIPLOCs)\n"
         )
 PY
 
 # Retention: prune sweep log entries older than 90 days,
-# matching cif_name_watch.sh's established convention.
+# matching name_watch.sh's established convention.
 # This log was previously append-only forever.
 
 python3 - "$REPORT" << 'PY2'

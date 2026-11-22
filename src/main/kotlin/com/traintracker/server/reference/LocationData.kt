@@ -1,4 +1,4 @@
-package com.traintracker.server.cif
+package com.traintracker.server.reference
 
 import com.traintracker.server.Config
 import com.traintracker.server.database.AppDatabase
@@ -23,10 +23,10 @@ private val log = LoggerFactory.getLogger("LocationData")
 
 /**
  * Location reference data. Where each value comes from:
- *   - which TIPLOCs are current ........ the CIF feed (cif_cache.gz) - the ONLY thing taken from CIF
+ *   - which TIPLOCs are current ........ the schedule feed (schedule_cache.gz) - the ONLY thing taken from the schedule
  *   - name and STANOX .................. PIF / BPLAN  LOC records
  *   - CRS .............................. NLC / CORPUS xml
- * The three arrive independently (CIF on its own schedule, PIF and NLC via the RDM watcher), so
+ * The three arrive independently (the schedule on its own timetable, PIF and NLC via the RDM watcher), so
  * nothing is applied to CorpusLookup until all three have loaded in this process; until then the
  * previously saved maps stay in use. Load order does not matter.
  *
@@ -34,14 +34,14 @@ private val log = LoggerFactory.getLogger("LocationData")
  * Manual overrides (location_overrides) are untouched and still win inside CorpusLookup.
  */
 object LocationData {
-    /** Only keep TIPLOCs that are in the current CIF. Set false to use every PIF/NLC TIPLOC. */
-    private const val FILTER_BY_CIF = true
+    /** Only keep TIPLOCs that are in the current schedule. Set false to use every PIF/NLC TIPLOC. */
+    private const val FILTER_BY_SCHEDULE = true
 
     /**
      * STANOX source rule. NLC (CORPUS) is on top: where NLC and PIF disagree the NLC value is used, and where PIF
      * has none but NLC does, NLC fills the gap. PIF supplies the STANOX wherever NLC has none. Every disagreement
      * is logged. Set false to make PIF win a disagreement instead (PIF still fills where it is the only source).
-     * Reason: PIF carries some wrong values, e.g. CARR333 has 86212 where CORPUS and CIF both say 01173.
+     * Reason: PIF carries some wrong values, e.g. CARR333 has 86212 where CORPUS and the schedule both say 01173.
      */
     private const val NLC_STANOX_WINS = true
 
@@ -55,14 +55,14 @@ object LocationData {
         val names: Map<String, String>
     )
 
-    /** The nightly CIF download. Its TiplocV1 records are the "current TIPLOC" filter. */
-    private val CIF_CACHE = Config.CIF_CACHE
+    /** The nightly schedule download. Its TiplocV1 records are the "current TIPLOC" filter. */
+    private val SCHEDULE_CACHE = Config.SCHEDULE_CACHE
     private val TIPLOC_CODE = Regex("\"tiploc_code\"\\s*:\\s*\"([^\"]*)\"")
 
     private val lock = Any()
     @Volatile private var pif: Map<String, PifLoc> = emptyMap()
     @Volatile private var nlc: Map<String, NlcEntry> = emptyMap()
-    @Volatile private var cifTiplocs: Set<String>? = null
+    @Volatile private var scheduleTiplocs: Set<String>? = null
 
     /** Registers the two feeds only. Call before SmartLookup.start, which starts the shared watcher loop. */
     fun register() {
@@ -80,10 +80,10 @@ object LocationData {
 
     // ---- entry points ------------------------------------------------------
 
-    /** Called by CifParser after every CIF parse: the set of TIPLOCs present in the current CIF. */
-    fun onCif(currentTiplocs: Set<String>) {
+    /** Called by ScheduleParser after every schedule parse: the set of TIPLOCs present in the current schedule. */
+    fun onSchedule(currentTiplocs: Set<String>) {
         synchronized(lock) {
-            cifTiplocs = currentTiplocs
+            scheduleTiplocs = currentTiplocs
             applyIfReady()
         }
     }
@@ -97,35 +97,35 @@ object LocationData {
 
     private fun onSourceLoaded() {
         synchronized(lock) {
-            // The CIF import is skipped on restart when the cache is already up to date, so onCif would not
+            // The schedule import is skipped on restart when the cache is already up to date, so onSchedule would not
             // be called until the next nightly run. Read the filter from the cached file instead.
-            if (cifTiplocs == null && FILTER_BY_CIF) loadCifTiplocsFromCache()
+            if (scheduleTiplocs == null && FILTER_BY_SCHEDULE) loadScheduleTiplocsFromCache()
             applyIfReady()
         }
     }
 
-    private fun loadCifTiplocsFromCache() {
+    private fun loadScheduleTiplocsFromCache() {
         try {
-            if (!CIF_CACHE.isFile) {
-                log.warn("LocationData: ${CIF_CACHE.path} not found, waiting for the CIF import")
+            if (!SCHEDULE_CACHE.isFile) {
+                log.warn("LocationData: ${SCHEDULE_CACHE.path} not found, waiting for the schedule import")
                 return
             }
             val t0 = System.currentTimeMillis()
-            val set = readCifTiplocs(CIF_CACHE)
+            val set = readScheduleTiplocs(SCHEDULE_CACHE)
             if (set.isEmpty()) {
-                log.warn("LocationData: no TiplocV1 records found in ${CIF_CACHE.name}, waiting for the CIF import")
+                log.warn("LocationData: no TiplocV1 records found in ${SCHEDULE_CACHE.name}, waiting for the schedule import")
                 return
             }
-            cifTiplocs = set
-            log.info("LocationData: ${set.size} current TIPLOCs read from ${CIF_CACHE.name} (${System.currentTimeMillis() - t0} ms)")
+            scheduleTiplocs = set
+            log.info("LocationData: ${set.size} current TIPLOCs read from ${SCHEDULE_CACHE.name} (${System.currentTimeMillis() - t0} ms)")
         } catch (e: Exception) {
-            // e.g. the file is mid-download: wait for the nightly import to call onCif instead
-            log.warn("LocationData: could not read ${CIF_CACHE.name}: ${e.message}")
+            // e.g. the file is mid-download: wait for the nightly import to call onSchedule instead
+            log.warn("LocationData: could not read ${SCHEDULE_CACHE.name}: ${e.message}")
         }
     }
 
-    /** TiplocV1 records come before the schedules in the CIF JSON, so stop at the first schedule. */
-    private fun readCifTiplocs(file: File): Set<String> {
+    /** TiplocV1 records come before the schedules in the schedule JSON, so stop at the first schedule. */
+    private fun readScheduleTiplocs(file: File): Set<String> {
         val out = HashSet<String>(16_000)
         GZIPInputStream(file.inputStream().buffered(1 shl 16), 1 shl 16).use { gz ->
             BufferedReader(InputStreamReader(gz, Charsets.UTF_8), 1 shl 16).use { r ->
@@ -172,10 +172,10 @@ object LocationData {
         val p = pif
         val n = nlc
         if (p.isEmpty() || n.isEmpty()) return
-        val current = cifTiplocs
-        // An empty CIF set means the CIF parse found nothing - never treat that as "everything expired".
-        if (FILTER_BY_CIF && (current == null || current.isEmpty())) return
-        val b = build(p, n, if (FILTER_BY_CIF) current else null)
+        val current = scheduleTiplocs
+        // An empty schedule set means the schedule parse found nothing - never treat that as "everything expired".
+        if (FILTER_BY_SCHEDULE && (current == null || current.isEmpty())) return
+        val b = build(p, n, if (FILTER_BY_SCHEDULE) current else null)
         logDiff(b)
         if (SHADOW) {
             log.info("LocationData: SHADOW mode, nothing applied")
@@ -186,7 +186,7 @@ object LocationData {
         AppDatabase.saveStanoxMap(b.stanoxToCrs)
         CorpusLookup.mergeStanoxToTiplocFromFeed(b.stanoxToTiploc)
         AppDatabase.saveStanoxTiplocMap(b.stanoxToTiploc)
-        CorpusLookup.mergeCifNamesFromFeed(b.names)
+        CorpusLookup.mergeNamesFromFeed(b.names)
     }
 
     private fun build(pif: Map<String, PifLoc>, nlc: Map<String, NlcEntry>, onlyThese: Set<String>?): Built {
@@ -255,7 +255,7 @@ object LocationData {
             "LocationData built: universe=${universe.size} tiploc->crs=${tiplocToCrs.size} stanox->crs=${stanoxToCrs.size} " +
                 "stanox->tiploc=${stanoxToTiploc.size} names=${names.size} ambiguousStanox=$ambiguous " +
                 "stanoxCrsAmbiguous=$crsAmbiguous stanoxPifNlcConflicts=$stanoxConflicts stanoxFromNlcOnly=$stanoxNlcOnly " +
-                "pifTiplocsNotInCif=$dropped/${pif.size}"
+                "pifTiplocsNotInSchedule=$dropped/${pif.size}"
         )
         return Built(tiplocToCrs, stanoxToCrs, stanoxToTiploc, names)
     }

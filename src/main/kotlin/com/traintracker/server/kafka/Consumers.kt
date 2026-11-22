@@ -1,8 +1,8 @@
 package com.traintracker.server.kafka
 
 import com.traintracker.server.Config
-import com.traintracker.server.cif.CifParser
-import com.traintracker.server.cif.insertStops
+import com.traintracker.server.reference.ScheduleParser
+import com.traintracker.server.reference.insertStops
 import com.traintracker.server.database.AppDatabase
 import com.traintracker.server.database.Schedules
 import java.time.Duration
@@ -169,7 +169,7 @@ object VstpConsumer {
                     if (deleted > 0) log.info("VSTP Delete: uid=$uid stp=$stp removed $deleted rows")
                 }
                 "Create" -> {
-                    val stops = CifParser.parseVstpSchedule(schedule)
+                    val stops = ScheduleParser.parseVstpSchedule(schedule)
                     if (stops.isEmpty()) return
                     transaction {
                         deleteSchedule(uid, stp, startDate, endDate)

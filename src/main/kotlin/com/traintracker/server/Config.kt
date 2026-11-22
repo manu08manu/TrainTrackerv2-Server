@@ -12,12 +12,12 @@ object Config {
     /** Web pages, static assets and data files the server reads and writes. */
     const val DATA_DIR: String = "/opt/traintracker"
 
-    /** The nightly full CIF download. */
-    val CIF_CACHE: File = File(DATA_DIR, "cif_cache.gz")
+    /** The nightly full schedule, copied from the RDM file. */
+    val SCHEDULE_CACHE: File = File(DATA_DIR, "schedule_cache.gz")
 
-    /** Local RDM feed - the daily full CIF JSON gzip. Override with CIF_SOURCE_PATH if needed. */
-    val cifSourcePath: String =
-        System.getenv("CIF_SOURCE_PATH") ?: "/srv/rdm/in/CIF_ALL_FULL_DAILY_toc-full.json.gz"
+    /** Local RDM feed - the daily full schedule JSON gzip. Override with SCHEDULE_SOURCE_PATH if needed. */
+    val scheduleSourcePath: String =
+        System.getenv("SCHEDULE_SOURCE_PATH") ?: "/srv/rdm/in/CIF_ALL_FULL_DAILY_toc-full.json.gz"
 
     val port: Int = System.getenv("PORT")?.toIntOrNull() ?: 8080
 

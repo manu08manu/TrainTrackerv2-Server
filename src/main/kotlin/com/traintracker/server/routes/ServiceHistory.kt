@@ -3,8 +3,8 @@ package com.traintracker.server.routes
 import com.traintracker.server.Retention
 
 import com.traintracker.server.ReasonCodes
-import com.traintracker.server.cif.CorpusLookup
-import com.traintracker.server.cif.ScheduleCancellations
+import com.traintracker.server.reference.CorpusLookup
+import com.traintracker.server.reference.ScheduleCancellations
 import com.traintracker.server.database.query
 import com.traintracker.server.database.queryFirst
 import io.ktor.server.response.respond

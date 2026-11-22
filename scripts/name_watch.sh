@@ -1,30 +1,30 @@
 #!/bin/bash
 # Weekly watch: alert when TPS changes a name/CRS for any TIPLOC we have named.
-# Compares today's CIF against the last snapshot; logs changes; updates snapshot.
+# Compares today's schedule against the last snapshot; logs changes; updates snapshot.
 set -u
-SNAPDIR=~/traintracker-backend/scripts/cif_snapshots
+SNAPDIR=~/traintracker-backend/scripts/name_snapshots
 mkdir -p "$SNAPDIR"
-SNAP="$SNAPDIR/cif_snapshot_$(date +%Y%m%d).tsv"
-WEEK_AGO="$SNAPDIR/cif_snapshot_$(date -d '7 days ago' +%Y%m%d).tsv"
+SNAP="$SNAPDIR/name_snapshot_$(date +%Y%m%d).tsv"
+WEEK_AGO="$SNAPDIR/name_snapshot_$(date -d '7 days ago' +%Y%m%d).tsv"
 [ -f "$WEEK_AGO" ] || WEEK_AGO=""
-REPORT=~/traintracker-backend/logs/cif_name_changes.log
-F=/tmp/cif_watch_daily.gz
+REPORT=~/traintracker-backend/logs/name_changes.log
+F=/tmp/name_watch_daily.gz
 
-CACHE=/opt/traintracker/cif_cache.gz
-source "$(dirname "$0")/cif_cache.sh"
-download_cif_to "$CACHE" "$F" "$REPORT" || exit 1
+CACHE=/opt/traintracker/schedule_cache.gz
+source "$(dirname "$0")/schedule_cache.sh"
+download_schedule_to "$CACHE" "$F" "$REPORT" || exit 1
 [ "$(stat -c%s "$F")" -lt 1000000 ] && { echo "$(date '+%F %T') download failed" >> "$REPORT"; rm -f "$F"; exit 1; }
 
 python3 - "$WEEK_AGO" "$SNAP" "$REPORT" "$F" << 'PY'
 import gzip, json, sqlite3, sys, os, datetime
-prev_path, snap_path, report_path, cif_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+prev_path, snap_path, report_path, schedule_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 
 con = sqlite3.connect("file:/opt/traintracker/traintracker.db?mode=ro", uri=True)
 watched = {r[0] for r in con.execute("SELECT tiploc FROM location_overrides")}
 con.close()
 
 current = {}
-with gzip.open(cif_path, "rt") as f:
+with gzip.open(schedule_path, "rt") as f:
     for line in f:
         if '"TiplocV1"' not in line: continue
         t = json.loads(line)["TiplocV1"]
@@ -47,12 +47,12 @@ for tip, (desc, crs) in sorted(current.items()):
         changes.append(f"{tip}: '{old[tip][0]}' [{old[tip][1]}] -> '{desc}' [{crs}]")
         alert_rows.append((tip, old[tip][0], old[tip][1], desc, crs))
 for tip in sorted(set(old) & watched - set(current)):
-    changes.append(f"{tip}: REMOVED from CIF (was '{old[tip][0]}')")
+    changes.append(f"{tip}: REMOVED from the schedule (was '{old[tip][0]}')")
 # Batch 60: the NEW branch is gone. Confirmed live 2026-07-21 that it reports
-# false positives -- YORKTPE showed as "NEW in CIF" purely because its override
+# false positives -- YORKTPE showed as "NEW in the schedule" purely because its override
 # was added THIS week, so it wasn't in `watched` (and therefore not in `old`)
 # when last week's snapshot was taken, even though the TIPLOC has existed in
-# CIF for years. "New" here means "newly watched by us", not "new to CIF" --
+# the schedule for years. "New" here means "newly watched by us", not "new to the schedule" --
 # not a signal worth alerting on.
 
 stamp = datetime.datetime.now().strftime("%F %T")
@@ -64,14 +64,14 @@ with open(report_path, "a") as r:
         r.write(f"{stamp}: no changes ({len(current)} TIPLOCs checked)\n")
 
 import json as _json
-with open("/opt/traintracker/cif_changes.json", "w") as j:
+with open("/opt/traintracker/name_changes.json", "w") as j:
     _json.dump({"last_run": stamp, "checked": len(current),
                 "change_count": len(changes), "changes": changes}, j)
 
 if alert_rows:
     con2 = sqlite3.connect("/opt/traintracker/traintracker.db")
     for tip, od, oc, nd, nc in alert_rows:
-        con2.execute("""INSERT INTO cif_change_alerts (tiploc, old_desc, old_crs, new_desc, new_crs, first_seen, last_seen)
+        con2.execute("""INSERT INTO name_change_alerts (tiploc, old_desc, old_crs, new_desc, new_crs, first_seen, last_seen)
                          VALUES (?, ?, ?, ?, ?, ?, ?)
                          ON CONFLICT(tiploc, old_desc, old_crs, new_desc, new_crs)
                          DO UPDATE SET last_seen = excluded.last_seen""",
@@ -83,7 +83,7 @@ with open(snap_path, "w") as s:
     for tip, (desc, crs) in sorted(current.items()):
         s.write(f"{tip}\t{desc}\t{crs}\n")
 PY
-find "$SNAPDIR" -name "cif_snapshot_*.tsv" -mtime +8 -delete
+find "$SNAPDIR" -name "name_snapshot_*.tsv" -mtime +8 -delete
 rm -f "$F"
 
 # Prune log entries older than 90 days (blocks are grouped under a dated

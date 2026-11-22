@@ -1,11 +1,11 @@
 package com.traintracker.server.routes
 
-import com.traintracker.server.cif.CorpusLookup
+import com.traintracker.server.reference.CorpusLookup
 import kotlinx.serialization.Serializable
 
 @Serializable
 data class StatusResponse(
-    val cifLastDownload: String?,
+    val scheduleLastImport: String?,
     val linxConnected: Boolean,
     val trainLocationsCount: Int,
     val scheduleCount: Int = 0,
@@ -15,7 +15,7 @@ data class StatusResponse(
     val allocationsToday: Int = 0,
     val allocationRecords: Int = 0,
     val tiplocNameCount: Int = 0,
-    val cifChangePendingCount: Int = 0,
+    val nameChangePendingCount: Int = 0,
     val missingTiplocCount: Int = 0,
     val missingTscCount: Int = 0,
     val feedbackCount: Int = 0

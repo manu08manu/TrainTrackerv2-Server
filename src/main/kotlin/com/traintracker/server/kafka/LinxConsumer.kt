@@ -1,7 +1,7 @@
 package com.traintracker.server.kafka
 
 import com.traintracker.server.Config
-import com.traintracker.server.cif.CorpusLookup
+import com.traintracker.server.reference.CorpusLookup
 import com.traintracker.server.database.AppDatabase
 import com.traintracker.server.database.MovementBatch
 import com.traintracker.server.database.execUpdate

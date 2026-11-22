@@ -1,6 +1,6 @@
 package com.traintracker.server.routes
 
-import com.traintracker.server.cif.CorpusLookup
+import com.traintracker.server.reference.CorpusLookup
 import com.traintracker.server.database.AppDatabase
 import com.traintracker.server.database.Schedules
 import com.traintracker.server.database.csvList

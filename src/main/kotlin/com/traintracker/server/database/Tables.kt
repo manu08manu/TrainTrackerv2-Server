@@ -77,11 +77,11 @@ object TrainLocations : Table("train_locations") {
     override val primaryKey = PrimaryKey(headcode, rid, name = "pk_train_locations")
 }
 
-object CifMeta : Table("cif_meta") {
+object AppMeta : Table("app_meta") {
     val key = varchar("key", 64)
     val value = varchar("value", 256)
 
-    override val primaryKey = PrimaryKey(key, name = "pk_cif_meta")
+    override val primaryKey = PrimaryKey(key, name = "pk_app_meta")
 }
 
 object HeadcodeAliases : Table("headcode_aliases") {
@@ -129,7 +129,7 @@ object DarwinPlatforms : Table("darwin_platforms") {
     }
 }
 
-object CifAssociations : Table("cif_associations") {
+object ScheduleAssociations : Table("schedule_associations") {
     val mainUid = varchar("main_uid", 6)
     val assocUid = varchar("assoc_uid", 6)
     val assocTiploc = varchar("assoc_tiploc", 7)
@@ -137,7 +137,7 @@ object CifAssociations : Table("cif_associations") {
     val stpInd = char("stp_ind")
     val dateIndicator = char("date_indicator").nullable()
 
-    override val primaryKey = PrimaryKey(mainUid, assocUid, assocTiploc, name = "pk_cif_associations")
+    override val primaryKey = PrimaryKey(mainUid, assocUid, assocTiploc, name = "pk_schedule_associations")
 }
 
 object AllocationChanges : Table("allocation_changes") {

@@ -1,6 +1,6 @@
 package com.traintracker.server.kafka
 
-import com.traintracker.server.cif.SmartEntry
+import com.traintracker.server.reference.SmartEntry
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter

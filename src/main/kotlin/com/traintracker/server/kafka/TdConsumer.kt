@@ -1,8 +1,8 @@
 package com.traintracker.server.kafka
 
 import com.traintracker.server.Config
-import com.traintracker.server.cif.CorpusLookup
-import com.traintracker.server.cif.SmartLookup
+import com.traintracker.server.reference.CorpusLookup
+import com.traintracker.server.reference.SmartLookup
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter

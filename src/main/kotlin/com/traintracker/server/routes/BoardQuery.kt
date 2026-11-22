@@ -1,8 +1,8 @@
 package com.traintracker.server.routes
 
 import com.traintracker.server.ReasonCodes
-import com.traintracker.server.cif.CorpusLookup
-import com.traintracker.server.cif.ScheduleCancellations
+import com.traintracker.server.reference.CorpusLookup
+import com.traintracker.server.reference.ScheduleCancellations
 import com.traintracker.server.database.AppDatabase
 import com.traintracker.server.database.CANCELLED_ONLY_SQL
 import com.traintracker.server.database.SCHEDULE_DATE_SCOPE_SQL
@@ -404,7 +404,7 @@ private fun JdbcTransaction.boardServices(
     }
     // Resolve all reported STANOX codes in one lookup.
     // Manual location overrides take precedence over current PIF names.
-    // Deliberately do not fall back to CIF-derived names.
+    // Deliberately do not fall back to the schedule-derived names.
     val reportNames = mutableMapOf<String, String>()
     val reportStanoxes = lastReports.values.map { it.stanox }.distinct()
 

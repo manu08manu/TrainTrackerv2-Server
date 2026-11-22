@@ -1,4 +1,4 @@
-package com.traintracker.server.cif
+package com.traintracker.server.reference
 
 import java.time.LocalDate
 import java.util.concurrent.atomic.AtomicReference
@@ -8,7 +8,7 @@ import org.slf4j.LoggerFactory
 
 private val log = LoggerFactory.getLogger("ScheduleCancellations")
 
-/** STP cancellation ('C') windows from the CIF: a uid is cancelled on dates inside a window on its listed weekdays. */
+/** STP cancellation ('C') windows from the schedule: a uid is cancelled on dates inside a window on its listed weekdays. */
 object ScheduleCancellations {
     private class Window(val uid: String, val start: String, val end: String, val days: String) {
         fun covers(date: LocalDate): Boolean {
@@ -20,7 +20,7 @@ object ScheduleCancellations {
     private val pending = ArrayList<Window>()
     private val cache = AtomicReference<Map<String, List<Window>>?>(null)
 
-    /** Starts collecting for a new CIF import. */
+    /** Starts collecting for a new schedule import. */
     fun begin() {
         synchronized(pending) { pending.clear() }
     }
@@ -45,17 +45,17 @@ object ScheduleCancellations {
         val list = synchronized(pending) { ArrayList(pending) }
         try {
             transaction {
-                exec("DELETE FROM cif_cancellations")
+                exec("DELETE FROM schedule_cancellations")
                 // Values were validated in collect(), so the INSERT is built as text.
                 for (chunk in list.chunked(400)) {
                     val values = chunk.joinToString(",") { "('${it.uid}','${it.start}','${it.end}','${it.days}')" }
-                    exec("INSERT OR IGNORE INTO cif_cancellations (uid, start_date, end_date, days) VALUES $values")
+                    exec("INSERT OR IGNORE INTO schedule_cancellations (uid, start_date, end_date, days) VALUES $values")
                 }
             }
             cache.set(list.groupBy { it.uid })
-            log.info("cif_cancellations: ${list.size} cancellation windows stored")
+            log.info("schedule_cancellations: ${list.size} cancellation windows stored")
         } catch (e: Exception) {
-            log.warn("cif_cancellations persist failed: ${e.message}")
+            log.warn("schedule_cancellations persist failed: ${e.message}")
         }
     }
 
@@ -80,7 +80,7 @@ object ScheduleCancellations {
         val loaded = HashMap<String, MutableList<Window>>()
         try {
             transaction {
-                exec("SELECT uid, start_date, end_date, days FROM cif_cancellations") { rs ->
+                exec("SELECT uid, start_date, end_date, days FROM schedule_cancellations") { rs ->
                     while (rs.next()) {
                         val w = Window(rs.getString(1), rs.getString(2), rs.getString(3), rs.getString(4))
                         loaded.getOrPut(w.uid) { mutableListOf() }.add(w)
@@ -89,7 +89,7 @@ object ScheduleCancellations {
             }
             cache.set(loaded)
         } catch (e: Exception) {
-            log.warn("cif_cancellations load failed: ${e.message}")
+            log.warn("schedule_cancellations load failed: ${e.message}")
         }
         return loaded
     }

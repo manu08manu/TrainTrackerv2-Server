@@ -7,6 +7,6 @@ build/
 env.conf
 .env
 
-# Runtime logs and generated CIF snapshots
+# Runtime logs and generated name snapshots
 logs/
-scripts/cif_snapshots/
+scripts/name_snapshots/

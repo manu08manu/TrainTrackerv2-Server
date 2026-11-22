@@ -1,9 +1,9 @@
 package com.traintracker.server
 
-import com.traintracker.server.cif.ScheduleImporter
-import com.traintracker.server.cif.CorpusLookup
-import com.traintracker.server.cif.LocationData
-import com.traintracker.server.cif.SmartLookup
+import com.traintracker.server.reference.ScheduleImporter
+import com.traintracker.server.reference.CorpusLookup
+import com.traintracker.server.reference.LocationData
+import com.traintracker.server.reference.SmartLookup
 import com.traintracker.server.database.AppDatabase
 import com.traintracker.server.kafka.AllocationConsumer
 import com.traintracker.server.kafka.DarwinConsumer
@@ -110,13 +110,13 @@ private fun Application.configure() {
     monitor.subscribe(ApplicationStopped) { backgroundScope.cancel() }
 }
 
-/** Loads saved state, starts the feeds and schedules the daily CIF refresh, hourly pruning and minute flushes. */
+/** Loads saved state, starts the feeds and schedules the daily schedule refresh, hourly pruning and minute flushes. */
 private suspend fun startBackgroundWork(scope: CoroutineScope) {
     log.info("TrainTracker backend starting…")
     try {
         ScheduleImporter.importIfNeeded()
     } catch (e: Exception) {
-        log.error("CIF import failed on startup: ${e.message}")
+        log.error("Schedule import failed on startup: ${e.message}")
     }
     restoreSavedState()
     LinxConsumer.start(scope)
@@ -133,12 +133,12 @@ private suspend fun startBackgroundWork(scope: CoroutineScope) {
         while (isActive) {
             delay(millisUntil(nextTimeOfDay(3, 15)))
             try {
-                log.info("Nightly CIF refresh starting…")
+                log.info("Nightly schedule refresh starting…")
                 // Source still settling, changed mid-copy or missing: retry every 10 min for up to 2 h.
                 var attempts = 0
                 while (ScheduleImporter.importIfNeeded() && ++attempts < 12) delay(10 * 60_000L)
             } catch (e: Exception) {
-                log.error("Nightly CIF refresh failed: ${e.message}")
+                log.error("Nightly schedule refresh failed: ${e.message}")
             }
         }
     }
@@ -188,7 +188,7 @@ private fun restoreSavedState() {
         CorpusLookup.mergeStanoxFromFeed(stanoxMap)
         log.info("Stanox map reloaded from DB: ${stanoxMap.size} entries")
     } else {
-        log.warn("Stanox map empty — delays may not show until next CIF import")
+        log.warn("Stanox map empty — delays may not show until next schedule import")
     }
     val stanoxTiplocMap = AppDatabase.loadStanoxTiplocMap()
     if (stanoxTiplocMap.isNotEmpty()) {

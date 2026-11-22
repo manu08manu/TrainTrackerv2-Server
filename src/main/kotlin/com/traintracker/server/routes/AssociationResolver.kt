@@ -1,6 +1,6 @@
 package com.traintracker.server.routes
 
-import com.traintracker.server.cif.CorpusLookup
+import com.traintracker.server.reference.CorpusLookup
 import com.traintracker.server.database.Allocations
 import com.traintracker.server.database.AppDatabase
 import com.traintracker.server.database.AssociationRecord
@@ -16,7 +16,7 @@ import kotlinx.serialization.Serializable
 import org.jetbrains.exposed.v1.jdbc.JdbcTransaction
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 
-// CIF associations: VV = divide (split), JJ = join, NP = next working (the train this one forms).
+// Schedule associations: VV = divide (split), JJ = join, NP = next working (the train this one forms).
 
 @Serializable
 data class SplitCandidate(
@@ -106,7 +106,7 @@ fun JdbcTransaction.buildAssociationContext(uids: Set<String>, date: String = Lo
     )
 }
 
-/** The date of a connecting service from a CIF date indicator: N = next day, P = previous day, S = same day. */
+/** The date of a connecting service from a schedule date indicator: N = next day, P = previous day, S = same day. */
 fun resolveConnectionDate(requestedDate: String, dateIndicator: Char?, fallbackNextDay: Boolean = false): String {
     val base = LocalDate.parse(requestedDate)
     return when (dateIndicator) {

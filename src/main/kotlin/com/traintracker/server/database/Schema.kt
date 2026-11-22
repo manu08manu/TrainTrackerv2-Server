@@ -17,8 +17,8 @@ object Schema {
         "ELSE headcode END"
 
     private val exposedTables = arrayOf(
-        SavedMaps, Schedules, Movements, TrainLocations, CifMeta, AllocationLegs,
-        HeadcodeAliases, AllocationChanges, CifAssociations, DarwinPlatforms,
+        SavedMaps, Schedules, Movements, TrainLocations, AppMeta, AllocationLegs,
+        HeadcodeAliases, AllocationChanges, ScheduleAssociations, DarwinPlatforms,
         TrainActivations,
     )
 
@@ -46,8 +46,8 @@ object Schema {
         "CREATE TABLE IF NOT EXISTS td_events (headcode TEXT NOT NULL, stanox TEXT NOT NULL, event_type TEXT NOT NULL, event_s INTEGER NOT NULL, nr_headcode TEXT GENERATED ALWAYS AS ($NR_HEADCODE_EXPRESSION) VIRTUAL, PRIMARY KEY (headcode, stanox, event_type, event_s)) WITHOUT ROWID",
         "CREATE INDEX IF NOT EXISTS idx_td_events_s ON td_events(event_s)",
         "CREATE INDEX IF NOT EXISTS idx_td_events_stanox ON td_events(stanox)",
-        // CIF cancellation windows (STP 'C' schedules)
-        "CREATE TABLE IF NOT EXISTS cif_cancellations (uid TEXT NOT NULL, start_date TEXT NOT NULL, end_date TEXT NOT NULL, days TEXT NOT NULL, PRIMARY KEY (uid, start_date, end_date, days)) WITHOUT ROWID",
+        // Schedule cancellation windows (STP 'C' schedules)
+        "CREATE TABLE IF NOT EXISTS schedule_cancellations (uid TEXT NOT NULL, start_date TEXT NOT NULL, end_date TEXT NOT NULL, days TEXT NOT NULL, PRIMARY KEY (uid, start_date, end_date, days)) WITHOUT ROWID",
         // RDM location reference files
         "CREATE TABLE IF NOT EXISTS pif_loc (tiploc TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', start_date TEXT NOT NULL, end_date TEXT, os_easting INTEGER, os_northing INTEGER, timing_point_type TEXT NOT NULL DEFAULT '', zone TEXT NOT NULL DEFAULT '', stanox TEXT, off_network INTEGER NOT NULL DEFAULT 0, force_lpb TEXT NOT NULL DEFAULT '', action TEXT NOT NULL DEFAULT '', source_file TEXT NOT NULL DEFAULT '', loaded_at TEXT DEFAULT (datetime('now')))",
         "CREATE INDEX IF NOT EXISTS idx_pif_loc_stanox ON pif_loc(stanox)",

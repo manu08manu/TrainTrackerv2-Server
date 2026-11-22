@@ -8,7 +8,7 @@ import com.traintracker.server.database.queryList
 import com.traintracker.server.database.unitsCsv
 import org.jetbrains.exposed.v1.jdbc.JdbcTransaction
 
-// Splits and joins inferred from the units allocated to trains, for when the CIF has no association.
+// Splits and joins inferred from the units allocated to trains, for when the schedule has no association.
 
 /** True when the movements have a train ID for the uid, within a day of [date], that only has cancellations. */
 fun JdbcTransaction.isUidWhollyCancelled(uid: String, date: String): Boolean = queryFirst(
@@ -18,11 +18,11 @@ fun JdbcTransaction.isUidWhollyCancelled(uid: String, date: String): Boolean = q
 
 private fun JdbcTransaction.unitSet(uid: String, date: String): Set<String> = unitsCsv(uid, date).csvList().toSet()
 
-/** (uid, headcode) of the train this one joins (CIF 'JJ'), preferring one that shares a unit. */
+/** (uid, headcode) of the train this one joins ('JJ' association), preferring one that shares a unit. */
 fun JdbcTransaction.lookupJoinsInto(uid: String, date: String): Pair<String?, String?> {
     val myUnits = unitSet(uid, date)
-    val candidates = queryList("SELECT main_uid FROM cif_associations WHERE assoc_uid=? AND assoc_type='JJ'", listOf(uid)) { it.getString("main_uid") } +
-        queryList("SELECT assoc_uid FROM cif_associations WHERE main_uid=? AND assoc_type='JJ'", listOf(uid)) { it.getString("assoc_uid") }
+    val candidates = queryList("SELECT main_uid FROM schedule_associations WHERE assoc_uid=? AND assoc_type='JJ'", listOf(uid)) { it.getString("main_uid") } +
+        queryList("SELECT assoc_uid FROM schedule_associations WHERE main_uid=? AND assoc_type='JJ'", listOf(uid)) { it.getString("assoc_uid") }
     val joinsUid = (if (myUnits.isNotEmpty()) candidates.firstOrNull { cand -> unitSet(cand, date).any { it in myUnits } } else null)
         ?: candidates.firstOrNull()
     val joinsHeadcode = joinsUid?.let {

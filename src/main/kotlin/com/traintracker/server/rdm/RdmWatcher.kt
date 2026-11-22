@@ -112,9 +112,9 @@ class RdmFeed(
             if (!RdmFiles.isSettled(f)) return
             val key = RdmFiles.versionKey(f)
             if (key == lastKey) return
-            load(f, AppDatabase.getCifMeta(metaKey) != key)
+            load(f, AppDatabase.getMeta(metaKey) != key)
             lastKey = key
-            AppDatabase.setCifMeta(metaKey, key)
+            AppDatabase.setMeta(metaKey, key)
             log.info("$name loaded from ${f.name}")
         } finally {
             runCatching { tick() }

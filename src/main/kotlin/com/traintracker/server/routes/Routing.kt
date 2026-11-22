@@ -2,7 +2,7 @@ package com.traintracker.server.routes
 
 import com.traintracker.server.Config
 import com.traintracker.server.auth.authRoutes
-import com.traintracker.server.cif.CorpusLookup
+import com.traintracker.server.reference.CorpusLookup
 import com.traintracker.server.database.Allocations
 import com.traintracker.server.database.AppDatabase
 import com.traintracker.server.database.HeadcodeAliases
@@ -68,9 +68,9 @@ private fun Route.statusRoutes() {
     get("/status") {
         call.respond(AppDatabase.status(trainLocations.isNotEmpty(), trainLocations.size))
     }
-    // Written daily by scripts/cif_name_watch.sh
-    get("/cif-changes") {
-        val file = File("${Config.DATA_DIR}/cif_changes.json")
+    // Written daily by scripts/name_watch.sh
+    get("/name-changes") {
+        val file = File("${Config.DATA_DIR}/name_changes.json")
         val json = if (file.exists()) file.readText() else "{\"last_run\":null,\"checked\":0,\"change_count\":0,\"changes\":[]}"
         call.respondText(json, ContentType.Application.Json)
     }

@@ -1,9 +1,9 @@
 package com.traintracker.server.routes
 
 import com.traintracker.server.auth.changedBy
-import com.traintracker.server.cif.CorpusLookup
-import com.traintracker.server.cif.LocationData
-import com.traintracker.server.cif.SmartLookup
+import com.traintracker.server.reference.CorpusLookup
+import com.traintracker.server.reference.LocationData
+import com.traintracker.server.reference.SmartLookup
 import com.traintracker.server.database.AdminData
 import com.traintracker.server.database.Overrides
 import io.ktor.http.HttpStatusCode
@@ -81,7 +81,7 @@ private fun Route.locationRoutes() {
     }
 }
 
-/** Items waiting for an admin: missing TIPLOC names, missing TSC operators, SMART gaps, CIF change alerts. */
+/** Items waiting for an admin: missing TIPLOC names, missing TSC operators, SMART gaps, name change alerts. */
 private fun Route.workQueueRoutes() {
     adminGet("/admin/missing-tiplocs") {
         respond(mapOf("missing" to AdminData.missingTiplocs()))
@@ -119,13 +119,13 @@ private fun Route.workQueueRoutes() {
         AdminData.deleteSmartGap(key)
         respondOk("stanox" to key)
     }
-    adminGet("/admin/cif-change-alerts") {
-        respond(mapOf("alerts" to AdminData.cifChangeAlerts()))
+    adminGet("/admin/name-change-alerts") {
+        respond(mapOf("alerts" to AdminData.nameChangeAlerts()))
     }
-    adminDelete("/admin/cif-change-alerts") {
+    adminDelete("/admin/name-change-alerts") {
         val tiploc = param("tiploc")
         if (tiploc.isEmpty()) return@adminDelete badRequest("tiploc required")
-        AdminData.dismissCifChangeAlert(
+        AdminData.dismissNameChangeAlert(
             tiploc,
             parameters["oldDesc"] ?: "",
             parameters["oldCrs"] ?: "",

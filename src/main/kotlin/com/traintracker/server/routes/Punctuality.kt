@@ -2,8 +2,8 @@ package com.traintracker.server.routes
 
 import com.traintracker.server.Retention
 
-import com.traintracker.server.cif.CorpusLookup
-import com.traintracker.server.cif.ScheduleCancellations
+import com.traintracker.server.reference.CorpusLookup
+import com.traintracker.server.reference.ScheduleCancellations
 import com.traintracker.server.database.AppDatabase
 import com.traintracker.server.database.SCHEDULE_DATE_SCOPE_SQL
 import com.traintracker.server.database.activationsFor
@@ -353,9 +353,9 @@ internal object Punctuality {
     fun start(scope: CoroutineScope) = scope.launch {
         delay(5 * 60_000L)   // let startup and the Kafka backlog settle
         // When the counting rules change, every stored day is worked out again.
-        if (AppDatabase.getCifMeta(RULES_KEY) != RULES_VERSION) {
+        if (AppDatabase.getMeta(RULES_KEY) != RULES_VERSION) {
             transaction { execUpdate("DELETE FROM punctuality_days") }
-            AppDatabase.setCifMeta(RULES_KEY, RULES_VERSION)
+            AppDatabase.setMeta(RULES_KEY, RULES_VERSION)
             log.info("Punctuality rules changed: rebuilding every stored day")
         }
         while (isActive) {

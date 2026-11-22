@@ -1,8 +1,8 @@
 package com.traintracker.server.routes
 
 import com.traintracker.server.ReasonCodes
-import com.traintracker.server.cif.CorpusLookup
-import com.traintracker.server.cif.ScheduleCancellations
+import com.traintracker.server.reference.CorpusLookup
+import com.traintracker.server.reference.ScheduleCancellations
 import com.traintracker.server.database.Allocations
 import com.traintracker.server.database.AppDatabase
 import com.traintracker.server.database.Schedules
@@ -194,7 +194,7 @@ internal fun enrichWithUnits(services: List<ServiceResponse>, date: String = Loc
     }
 }
 
-/** Adds CIF association details (splits, joins, next working) for today. */
+/** Adds schedule association details (splits, joins, next working) for today. */
 internal fun annotateSplits(services: List<ServiceResponse>): List<ServiceResponse> {
     if (services.isEmpty()) return services
     return transaction {

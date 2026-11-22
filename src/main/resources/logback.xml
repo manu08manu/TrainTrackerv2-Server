@@ -18,7 +18,7 @@
     </appender>
 
     <logger name="KafkaConsumers"  level="INFO"/>
-    <logger name="CifParser"       level="INFO"/>
+    <logger name="ScheduleParser"       level="INFO"/>
     <logger name="Database"        level="INFO"/>
     <logger name="Application"     level="INFO"/>
 

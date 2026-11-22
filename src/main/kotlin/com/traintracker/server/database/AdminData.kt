@@ -2,7 +2,7 @@ package com.traintracker.server.database
 
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 
-/** Data behind the admin dashboard: operators, the "missing" work queues, CIF change alerts and user feedback. */
+/** Data behind the admin dashboard: operators, the "missing" work queues, name change alerts and user feedback. */
 object AdminData {
 
     // ---- Operators -----------------------------------------------------------------------------------
@@ -81,11 +81,11 @@ object AdminData {
         transaction { execUpdate("DELETE FROM missing_smart_stanox WHERE stanox = ?", listOf(key)) }
     }
 
-    // ---- CIF name/CRS change alerts (written by scripts/cif_name_watch.sh) ---------------------------
+    // ---- name/CRS change alerts (written by scripts/name_watch.sh) ---------------------------
 
-    fun cifChangeAlerts(): List<Map<String, String>> = transaction {
+    fun nameChangeAlerts(): List<Map<String, String>> = transaction {
         queryList(
-            "SELECT tiploc, old_desc, old_crs, new_desc, new_crs, first_seen, last_seen FROM cif_change_alerts WHERE dismissed_at IS NULL ORDER BY last_seen DESC LIMIT 200"
+            "SELECT tiploc, old_desc, old_crs, new_desc, new_crs, first_seen, last_seen FROM name_change_alerts WHERE dismissed_at IS NULL ORDER BY last_seen DESC LIMIT 200"
         ) { rs ->
             mapOf(
                 "tiploc" to (rs.getString("tiploc") ?: ""),
@@ -99,10 +99,10 @@ object AdminData {
         }
     }
 
-    fun dismissCifChangeAlert(tiploc: String, oldDesc: String, oldCrs: String, newDesc: String, newCrs: String) {
+    fun dismissNameChangeAlert(tiploc: String, oldDesc: String, oldCrs: String, newDesc: String, newCrs: String) {
         transaction {
             execUpdate(
-                "UPDATE cif_change_alerts SET dismissed_at = datetime('now') WHERE tiploc = ? AND old_desc = ? AND old_crs = ? AND new_desc = ? AND new_crs = ? AND dismissed_at IS NULL",
+                "UPDATE name_change_alerts SET dismissed_at = datetime('now') WHERE tiploc = ? AND old_desc = ? AND old_crs = ? AND new_desc = ? AND new_crs = ? AND dismissed_at IS NULL",
                 listOf(tiploc, oldDesc, oldCrs, newDesc, newCrs)
             )
         }

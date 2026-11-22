@@ -3,7 +3,7 @@ package com.traintracker.server.database
 import com.traintracker.server.Retention
 
 import com.traintracker.server.Config
-import com.traintracker.server.cif.CorpusLookup
+import com.traintracker.server.reference.CorpusLookup
 import com.traintracker.server.routes.StatusResponse
 import com.zaxxer.hikari.HikariConfig
 import com.zaxxer.hikari.HikariDataSource
@@ -103,7 +103,7 @@ object AppDatabase {
             "DELETE FROM darwin_platforms WHERE updated_at < datetime('now', '-24 hours')",
             "DELETE FROM train_activations WHERE updated_at < datetime('now', '-${Retention.TRAIN_ACTIVATION_DAYS} days')",
             "DELETE FROM schedules WHERE stp_indicator = 'N' AND schedule_end_date < date('now', '-${Retention.EXPIRED_SCHEDULE_DAYS} days')",
-            "DELETE FROM cif_change_alerts WHERE dismissed_at IS NOT NULL AND dismissed_at < datetime('now', '-7 days')",
+            "DELETE FROM name_change_alerts WHERE dismissed_at IS NOT NULL AND dismissed_at < datetime('now', '-7 days')",
             "DELETE FROM feedback WHERE dismissed_at IS NOT NULL AND dismissed_at < datetime('now', '-${Retention.FEEDBACK_DISMISSED_DAYS} days')",
             // linx_movements / linx_activations duplicate movements / train_activations; they are only
             // needed for the TD platform fill (15 minutes) and debugging.
@@ -364,14 +364,14 @@ object AppDatabase {
         log.info("replaceAssociations: ${all.size} valid today, ${kept.size} after STP precedence")
         if (kept.isEmpty()) return
         transaction {
-            CifAssociations.deleteAll()
-            CifAssociations.batchInsert(kept, ignore = true) { r ->
-                this[CifAssociations.mainUid] = r.mainUid
-                this[CifAssociations.assocUid] = r.assocUid
-                this[CifAssociations.assocTiploc] = r.assocTiploc
-                this[CifAssociations.assocType] = r.assocType
-                this[CifAssociations.stpInd] = r.stpInd
-                this[CifAssociations.dateIndicator] = r.dateIndicator
+            ScheduleAssociations.deleteAll()
+            ScheduleAssociations.batchInsert(kept, ignore = true) { r ->
+                this[ScheduleAssociations.mainUid] = r.mainUid
+                this[ScheduleAssociations.assocUid] = r.assocUid
+                this[ScheduleAssociations.assocTiploc] = r.assocTiploc
+                this[ScheduleAssociations.assocType] = r.assocType
+                this[ScheduleAssociations.stpInd] = r.stpInd
+                this[ScheduleAssociations.dateIndicator] = r.dateIndicator
             }
         }
         log.info("replaceAssociations: ${kept.size} records stored")
@@ -385,17 +385,17 @@ object AppDatabase {
 
     private fun associations(uids: Set<String>, byMain: Boolean): Map<String, List<AssociationRecord>> {
         if (uids.isEmpty()) return emptyMap()
-        val column = if (byMain) CifAssociations.mainUid else CifAssociations.assocUid
+        val column = if (byMain) ScheduleAssociations.mainUid else ScheduleAssociations.assocUid
         return transaction {
-            CifAssociations.selectAll().where { (column inList uids) and (CifAssociations.stpInd neq 'C') }
+            ScheduleAssociations.selectAll().where { (column inList uids) and (ScheduleAssociations.stpInd neq 'C') }
                 .map { row ->
                     AssociationRecord(
-                        row[CifAssociations.mainUid],
-                        row[CifAssociations.assocUid],
-                        row[CifAssociations.assocTiploc],
-                        row[CifAssociations.assocType],
-                        row[CifAssociations.stpInd],
-                        row[CifAssociations.dateIndicator]
+                        row[ScheduleAssociations.mainUid],
+                        row[ScheduleAssociations.assocUid],
+                        row[ScheduleAssociations.assocTiploc],
+                        row[ScheduleAssociations.assocType],
+                        row[ScheduleAssociations.stpInd],
+                        row[ScheduleAssociations.dateIndicator]
                     )
                 }
                 .groupBy { if (byMain) it.mainUid else it.assocUid }
@@ -404,15 +404,15 @@ object AppDatabase {
 
     // ---- Key/value stores ----------------------------------------------------------------------------
 
-    fun getCifMeta(key: String): String? = transaction {
-        CifMeta.selectAll().where { CifMeta.key eq key }.singleOrNull()?.get(CifMeta.value)
+    fun getMeta(key: String): String? = transaction {
+        AppMeta.selectAll().where { AppMeta.key eq key }.singleOrNull()?.get(AppMeta.value)
     }
 
-    fun setCifMeta(key: String, value: String) {
+    fun setMeta(key: String, value: String) {
         transaction {
-            CifMeta.replace {
-                it[CifMeta.key] = key
-                it[CifMeta.value] = value
+            AppMeta.replace {
+                it[AppMeta.key] = key
+                it[AppMeta.value] = value
             }
         }
     }
@@ -453,11 +453,11 @@ object AppDatabase {
                 return cached.copy(linxConnected = linxConnected, trainLocationsCount = trainLocCount)
             }
         }
-        val cifDate = getCifMeta("last_download_date")
+        val lastDownloadDate = getMeta("last_download_date")
         val today = LocalDate.now().toString()
         val resp = transaction {
             StatusResponse(
-                cifLastDownload = cifDate,
+                scheduleLastImport = lastDownloadDate,
                 linxConnected = linxConnected,
                 trainLocationsCount = trainLocCount,
                 scheduleCount = count("SELECT COUNT(*) FROM schedules"),
@@ -468,7 +468,7 @@ object AppDatabase {
                 allocationsToday = count("SELECT COUNT(DISTINCT headcode) FROM allocation_days WHERE service_date=?", listOf(today)),
                 allocationRecords = AllocationDays.selectAll().count().toInt(),
                 tiplocNameCount = CorpusLookup.tiplocNameCount(),
-                cifChangePendingCount = count("SELECT COUNT(*) FROM cif_change_alerts WHERE dismissed_at IS NULL"),
+                nameChangePendingCount = count("SELECT COUNT(*) FROM name_change_alerts WHERE dismissed_at IS NULL"),
                 missingTiplocCount = count("SELECT COUNT(*) FROM missing_tiplocs"),
                 missingTscCount = count("SELECT COUNT(*) FROM missing_tscs"),
                 feedbackCount = count("SELECT COUNT(*) FROM feedback WHERE dismissed_at IS NULL"),

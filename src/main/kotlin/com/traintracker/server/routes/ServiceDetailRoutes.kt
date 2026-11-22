@@ -1,8 +1,8 @@
 package com.traintracker.server.routes
 
 import com.traintracker.server.ReasonCodes
-import com.traintracker.server.cif.CorpusLookup
-import com.traintracker.server.cif.ScheduleCancellations
+import com.traintracker.server.reference.CorpusLookup
+import com.traintracker.server.reference.ScheduleCancellations
 import com.traintracker.server.database.Allocations
 import com.traintracker.server.database.AppDatabase
 import com.traintracker.server.database.CANCELLED_ONLY_SQL
@@ -560,8 +560,8 @@ private fun withTrainLength(
 // ---- Associations ----------------------------------------------------------------------------------------
 
 /**
- * CIF associations, minus links to wholly cancelled trains, plus the forms chain and splits inferred from
- * the units when the CIF has none.
+ * Schedule associations, minus links to wholly cancelled trains, plus the forms chain and splits inferred from
+ * the units when the schedule has none.
  */
 private suspend fun associationsFor(uid: String, svcDate: String, route: ServiceRoute, cps: List<CallingPointResponse>): AssociationInfo {
     val ctx = dbQuery { buildAssociationContext(setOf(uid), svcDate) }
