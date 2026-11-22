@@ -2,11 +2,11 @@ package com.traintracker.server
 
 /**
  * How long data is kept. Change DAYS and everything follows.
- * Keep 31 to show 30: yesterday's punctuality isn't built until noon, so the extra day means
- * 30 days are available even in the morning.
+ * Keep 61 to show 60: yesterday's punctuality isn't built until noon, so the extra day means
+ * 60 days are available even in the morning.
  */
 object Retention {
-    const val DAYS = 31L
+    const val DAYS = 61L
 
     /** Punctuality days shown to users: one less than kept. */
     const val PUNCTUALITY_SHOWN_DAYS = DAYS - 1

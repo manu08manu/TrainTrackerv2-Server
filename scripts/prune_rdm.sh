@@ -23,6 +23,38 @@ key() {
     *)    printf '%s' "$1" | tr -d ' 0-9' ;;
   esac
 }
+# PIF: each validity window is its own type. Keep only the newest settled copy per
+# window straight away, and drop files whose window ended before today (while at
+# least one still-valid PIF file remains). Header fields 5/6 = valid from/to (DD-MM-YYYY).
+declare -A pif_newest pif_end
+today=$(date +%Y%m%d)
+live=0
+while IFS= read -r f; do
+  pif_newest["$(key "$f")"]=$f
+  e=$(zcat -f -- "$f" 2>/dev/null | head -n1 | cut -f6 | awk '{split($1,d,"-"); print d[3] d[2] d[1]}')
+  pif_end["$f"]=$e
+  if [[ $e =~ ^[0-9]{8}$ ]] && [ "$e" -ge "$today" ]; then live=$((live+1)); fi
+done < <(ls -- PIF* 2>/dev/null | sort)
+while IFS= read -r f; do
+  e=${pif_end[$f]}
+  n=${pif_newest[$(key "$f")]}
+  if [[ $e =~ ^[0-9]{8}$ ]] && [ "$e" -lt "$today" ] && [ "$live" -ge 1 ]; then
+    echo "$(date '+%F %T') deleting $f (PIF window ended)"
+    [ -z "$DRY" ] && rm -f -- "$f"
+  elif [[ $e =~ ^[0-9]{8}$ ]] && [ "$f" != "$n" ] && [ -s "$n" ] && [ -z "$(find . -maxdepth 1 -name "$n" -mmin -10)" ]; then
+    echo "$(date '+%F %T') deleting $f (older PIF for the same window)"
+    [ -z "$DRY" ] && rm -f -- "$f"
+  fi
+done < <(ls -- PIF* 2>/dev/null | sort)
+# NLC (CORPUS) is a full snapshot dated in its name: keep only the newest once settled.
+nlc_newest=$(ls -- NLC*.xml.gz 2>/dev/null | sort | tail -n1)
+if [ -n "$nlc_newest" ] && [ -s "$nlc_newest" ] && [ -z "$(find . -maxdepth 1 -name "$nlc_newest" -mmin -10)" ]; then
+  for f in NLC*.xml.gz; do
+    [ "$f" = "$nlc_newest" ] && continue
+    echo "$(date '+%F %T') deleting $f (older NLC)"
+    [ -z "$DRY" ] && rm -f -- "$f"
+  done
+fi
 declare -A recent
 while IFS= read -r -d '' f; do recent["$(key "$f")"]=1; done \
   < <(find . -maxdepth 1 -type f -mmin -$mins -printf '%P\0')
