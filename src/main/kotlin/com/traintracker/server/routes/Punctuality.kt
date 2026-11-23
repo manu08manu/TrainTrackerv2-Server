@@ -488,7 +488,7 @@ fun Route.punctualityRoutes() {
         call.respond(dbQuery { Punctuality.summary(crs, toc, from, to) })
     }
     get("/league") {
-        val days = call.parameters["days"]?.toIntOrNull()?.takeIf { it in League.PERIODS } ?: Retention.PUNCTUALITY_SHOWN_DAYS.toInt()
+        val days = call.parameters["days"]?.toIntOrNull()?.takeIf { it in League.PERIODS } ?: Retention.DEFAULT_DAYS
         val (from, to) = call.timeWindow()
         call.respond(dbQuery { League.table(days, from, to) })
     }

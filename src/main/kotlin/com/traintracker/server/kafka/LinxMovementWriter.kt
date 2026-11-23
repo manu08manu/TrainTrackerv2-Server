@@ -128,7 +128,8 @@ internal object LinxMovementWriter {
         if (resolvedUid.isNotEmpty() && time.isNotEmpty()) {
             transaction {
                 Movements.update({
-                    (Movements.uid eq resolvedUid) and (Movements.scheduledTime eq time) and (Movements.isCancelled eq true)
+                    (Movements.uid eq resolvedUid) and (Movements.scheduledTime eq time) and (Movements.isCancelled eq true) and
+                    (Movements.serviceDate eq movementServiceDate(trainId, java.time.LocalDateTime.now()).toString())
                 }) {
                     it[isCancelled] = false
                     it[cancelReason] = null
@@ -203,7 +204,8 @@ internal object LinxMovementWriter {
         if (stanox == null) return
         val type = if (eventType == "DEPARTURE") "DEPARTURE" else "ARRIVAL"
         Movements.update({
-            (Movements.trainId eq trainId) and (Movements.stanox eq stanox) and (Movements.eventType eq type)
+            (Movements.trainId eq trainId) and (Movements.stanox eq stanox) and (Movements.eventType eq type) and
+            (Movements.serviceDate eq movementServiceDate(trainId, java.time.LocalDateTime.now()).toString())
         }) { it[Movements.platform] = platform }
     }
 }

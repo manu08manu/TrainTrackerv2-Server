@@ -54,13 +54,15 @@ object Movements : Table("movements") {
     val cancelReason = varchar("cancel_reason", 4).nullable()
     val eventTs = datetime("event_ts")
 
-    override val primaryKey = PrimaryKey(trainId, stanox, eventType, name = "pk_trust_movements")
+    val serviceDate = varchar("service_date", 10)
+
+    override val primaryKey = PrimaryKey(trainId, serviceDate, stanox, eventType, name = "pk_trust_movements")
 
     init {
-        index("idx_trust_hc", false, headcode)
-        index("idx_trust_ts", false, eventTs)
-        index("idx_trust_crs_time", false, crs, scheduledTime)
-        index("idx_trust_uid", false, uid, eventTs)
+        index("idx_mov_hc", false, headcode)
+        index("idx_mov_ts", false, eventTs)
+        index("idx_mov_crs_time", false, crs, scheduledTime)
+        index("idx_mov_uid", false, uid, eventTs)
     }
 }
 

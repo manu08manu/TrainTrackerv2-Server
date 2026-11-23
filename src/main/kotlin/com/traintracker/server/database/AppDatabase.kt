@@ -80,7 +80,7 @@ object AppDatabase {
 
     fun init() {
         val pool = HikariDataSource(HikariConfig().apply {
-            jdbcUrl = "jdbc:sqlite:${Config.sqlitePath}?busy_timeout=5000&journal_mode=WAL&synchronous=FULL&cache_size=-32768" +
+            jdbcUrl = "jdbc:sqlite:${Config.sqlitePath}?busy_timeout=5000&journal_mode=WAL&synchronous=NORMAL&cache_size=-32768" +
                 "&temp_store=MEMORY&mmap_size=268435456&journal_size_limit=67108864"
             driverClassName = "org.sqlite.JDBC"
             maximumPoolSize = 10
@@ -125,6 +125,7 @@ object AppDatabase {
     fun batchUpsertMovements(movements: List<MovementBatch>) {
         if (movements.isEmpty()) return
         transaction {
+            val now = LocalDateTime.now()
             Movements.batchReplace(movements) { m ->
                 this[Movements.headcode] = m.headcode
                 this[Movements.trainId] = m.trainId
@@ -137,7 +138,8 @@ object AppDatabase {
                 this[Movements.platform] = m.platform
                 this[Movements.isCancelled] = m.isCancelled
                 this[Movements.cancelReason] = m.cancelReason
-                this[Movements.eventTs] = LocalDateTime.now()
+                this[Movements.eventTs] = now
+                this[Movements.serviceDate] = movementServiceDate(m.trainId, now).toString()
             }
         }
     }
