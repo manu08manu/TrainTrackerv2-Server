@@ -9,7 +9,6 @@ import org.slf4j.LoggerFactory
 object Schema {
     private val log = LoggerFactory.getLogger("Database")
 
-    const val MASTER_ADMIN_BOOTSTRAP_EMAIL = "tannajaisal@gmail.com"
 
     private const val NR_HEADCODE_EXPRESSION =
         "CASE WHEN headcode GLOB '[A-Z][1-9][0-9][0-9]' " +
@@ -24,7 +23,7 @@ object Schema {
 
     private val rawTables = listOf(
         // Admin users and sessions
-        "CREATE TABLE IF NOT EXISTS admin_users (email TEXT PRIMARY KEY, password_hash TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS admin_users (email TEXT PRIMARY KEY, password_hash TEXT NOT NULL, is_master_admin INTEGER NOT NULL DEFAULT 0)",
         "CREATE TABLE IF NOT EXISTS admin_sessions (token TEXT PRIMARY KEY, email TEXT NOT NULL, expires_at TEXT NOT NULL)",
         // Audit trail of admin edits
         "CREATE TABLE IF NOT EXISTS tiploc_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, tiploc TEXT NOT NULL, old_name TEXT, new_name TEXT NOT NULL, changed_by TEXT NOT NULL, changed_at TEXT DEFAULT (datetime('now')))",
@@ -43,9 +42,10 @@ object Schema {
         "CREATE TABLE IF NOT EXISTS missing_smart_stanox (stanox TEXT PRIMARY KEY, first_seen TEXT DEFAULT (datetime('now')), last_seen TEXT DEFAULT (datetime('now')), seen_count INTEGER DEFAULT 1, headcode TEXT DEFAULT '', uid TEXT DEFAULT '')",
         "CREATE TABLE IF NOT EXISTS feedback (id INTEGER PRIMARY KEY AUTOINCREMENT, message TEXT NOT NULL, page TEXT DEFAULT '', submitted_at TEXT DEFAULT (datetime('now')), dismissed_at TEXT)",
         // Train describer events
-        "CREATE TABLE IF NOT EXISTS td_events (headcode TEXT NOT NULL, stanox TEXT NOT NULL, event_type TEXT NOT NULL, event_s INTEGER NOT NULL, nr_headcode TEXT GENERATED ALWAYS AS ($NR_HEADCODE_EXPRESSION) VIRTUAL, PRIMARY KEY (headcode, stanox, event_type, event_s)) WITHOUT ROWID",
+        "CREATE TABLE IF NOT EXISTS td_events (headcode TEXT NOT NULL, stanox TEXT NOT NULL, event_type TEXT NOT NULL, event_s INTEGER NOT NULL, platform TEXT, nr_headcode TEXT GENERATED ALWAYS AS ($NR_HEADCODE_EXPRESSION) VIRTUAL, PRIMARY KEY (headcode, stanox, event_type, event_s)) WITHOUT ROWID",
         "CREATE INDEX IF NOT EXISTS idx_td_events_s ON td_events(event_s)",
         "CREATE INDEX IF NOT EXISTS idx_td_events_stanox ON td_events(stanox)",
+        "CREATE INDEX IF NOT EXISTS idx_td_events_nrhc ON td_events(nr_headcode, stanox, event_s)",
         // Schedule cancellation windows (STP 'C' schedules)
         "CREATE TABLE IF NOT EXISTS schedule_cancellations (uid TEXT NOT NULL, start_date TEXT NOT NULL, end_date TEXT NOT NULL, days TEXT NOT NULL, PRIMARY KEY (uid, start_date, end_date, days)) WITHOUT ROWID",
         // RDM location reference files
@@ -82,9 +82,6 @@ object Schema {
     )
 
     fun create() {
-        renameTrustMovements()
-        retireHsp()
-        parkOldAllocationLegs()
         transaction {
             MigrationUtils.statementsRequiredForDatabaseMigration(*exposedTables).forEach { sql ->
                 if (sql.uppercase().contains("DROP ")) {
@@ -95,147 +92,7 @@ object Schema {
                 }
             }
         }
-        restoreAllocationLegs()
-        transaction {
-            rawTables.forEach { exec(it) }
-            addMasterAdminColumn()
-            addTdPlatformColumn()
-            addScheduleWttColumns()
-            addTdNrHeadcodeColumn()
-            addLinxModificationColumns()
-        }
+        transaction { rawTables.forEach { exec(it) } }
     }
 
-    /** td_events gained the SMART platform of the berth step; older tables lack the column. */
-    private fun JdbcTransaction.addTdPlatformColumn() {
-        val columns = queryList("PRAGMA table_info(td_events)") { it.getString(2) }
-        if ("platform" in columns) return
-        exec("ALTER TABLE td_events ADD COLUMN platform TEXT")
-        log.info("Migrated td_events.platform column")
-    }
-
-    /** schedules gained wtt_arrival and wtt_departure (working-timetable minutes, for LINX/TD matching only). */
-    private fun JdbcTransaction.addScheduleWttColumns() {
-        val columns = queryList("PRAGMA table_info(schedules)") { it.getString(2) }
-        if (columns.isEmpty()) return
-        for (column in listOf("wtt_arrival", "wtt_departure")) {
-            if (column in columns) continue
-            exec("ALTER TABLE schedules ADD COLUMN $column VARCHAR(5)")
-            log.info("Migrated schedules.$column column")
-        }
-    }
-
-    /** td_events gains a normalised NR-style headcode for matching LU descriptors. */
-    private fun JdbcTransaction.addTdNrHeadcodeColumn() {
-        // table_info omits generated columns; table_xinfo includes them.
-        val columns = queryList("PRAGMA table_xinfo(td_events)") { it.getString(2) }
-
-        if ("nr_headcode" !in columns) {
-            exec("""ALTER TABLE td_events ADD COLUMN nr_headcode TEXT
-            GENERATED ALWAYS AS ($NR_HEADCODE_EXPRESSION) VIRTUAL""")
-            log.info("Migrated td_events.nr_headcode column")
-        }
-
-        exec("CREATE INDEX IF NOT EXISTS idx_td_events_nrhc ON td_events(nr_headcode, stanox, event_s)")
-    }
-
-    /**
-     * trust_movements was renamed movements when TrainTracker switched from TRUST to LINX (2026-11). Runs before the Exposed
-     * migration so it never creates an empty movements table. The pk_trust_movements constraint and the
-     * idx_trust_* indexes keep their names: renaming an index means rebuilding it.
-     */
-    private fun renameTrustMovements() = transaction {
-        val tables = queryList("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('trust_movements', 'movements')") { it.getString(1) }
-        if ("trust_movements" in tables && "movements" !in tables) {
-            exec("ALTER TABLE trust_movements RENAME TO movements")
-            log.info("Renamed trust_movements to movements")
-        }
-    }
-
-    /**
-     * HSP is gone: its cache table only still holds the saved STANOX maps, so it becomes saved_maps, and the
-     * Darwin RID-to-uid table, which only HSP's unit lookup read, is dropped.
-     */
-    private fun retireHsp() = transaction {
-        val tables = queryList("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('hsp_cache', 'saved_maps', 'darwin_rid_uid')") { it.getString(1) }
-        if ("hsp_cache" in tables && "saved_maps" !in tables) {
-            exec("DELETE FROM hsp_cache WHERE cache_key NOT IN ('stanox_map', 'stanox_tiploc_map')")
-            exec("ALTER TABLE hsp_cache RENAME TO saved_maps")
-            log.info("Renamed hsp_cache to saved_maps")
-        }
-        if ("darwin_rid_uid" in tables) {
-            exec("DROP TABLE darwin_rid_uid")
-            log.info("Dropped darwin_rid_uid")
-        }
-    }
-
-    /** linx_modifications gained the old headcode of a change of identity, then every modified location. */
-    private fun JdbcTransaction.addLinxModificationColumns() {
-        val columns = queryList("PRAGMA table_info(linx_modifications)") { it.getString(2) }
-        for (column in listOf("previous_headcode", "locations")) {
-            if (column in columns) continue
-            exec("ALTER TABLE linx_modifications ADD COLUMN $column TEXT")
-            log.info("Migrated linx_modifications.$column column")
-        }
-    }
-
-    /** Older admin_users tables lack is_master_admin; add it and promote the bootstrap account. */
-    private fun JdbcTransaction.addMasterAdminColumn() {
-        val columns = queryList("PRAGMA table_info(admin_users)") { it.getString(2) }
-        if ("is_master_admin" in columns) return
-        exec("ALTER TABLE admin_users ADD COLUMN is_master_admin INTEGER NOT NULL DEFAULT 0")
-        execUpdate("UPDATE admin_users SET is_master_admin = 1 WHERE email = ?", listOf(MASTER_ADMIN_BOOTSTRAP_EMAIL))
-        log.info("Migrated is_master_admin column; bootstrap master admin: $MASTER_ADMIN_BOOTSTRAP_EMAIL")
-    }
-
-
-    /**
-     * allocation_legs was keyed by (core_id, allocation_seq), so each core kept only its latest day:
-     * replaceLegs deleted by core_id alone. The key now includes service_date. SQLite cannot alter a
-     * primary key, so the old table is parked before Exposed's migration creates the new one. Its
-     * explicit indexes are dropped at the same time, or their names would collide with the new table's.
-     */
-    private fun parkOldAllocationLegs() = transaction {
-        val tables = queryList("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('allocation_legs', 'allocation_legs_old')") { it.getString(1) }
-        if ("allocation_legs_old" in tables) {
-            log.info("allocation_legs already parked as allocation_legs_old")
-            return@transaction
-        }
-        if ("allocation_legs" !in tables) return@transaction
-        val pk = queryList("PRAGMA table_info(allocation_legs)") { it.getString(2) to it.getInt("pk") }
-            .filter { it.second > 0 }
-            .map { it.first }
-        if ("service_date" in pk) {
-            log.info("allocation_legs already keyed by service_date (${pk.joinToString(",")})")
-            return@transaction
-        }
-        exec("ALTER TABLE allocation_legs RENAME TO allocation_legs_old")
-        val indexes = queryList("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'allocation_legs_old' AND name NOT LIKE 'sqlite_%'") { it.getString(1) }
-        indexes.forEach { exec("DROP INDEX IF EXISTS \"$it\"") }
-        log.info("Parked allocation_legs as allocation_legs_old (old key: ${pk.joinToString(",")}), dropped ${indexes.size} index(es)")
-    }
-
-    /**
-     * Copies the parked rows into the re-keyed table, then drops the parked table. Runs after the
-     * Exposed migration has created allocation_legs. Idempotent: if the copy is interrupted the
-     * parked table survives and the next startup retries.
-     */
-    private fun restoreAllocationLegs() = transaction {
-        val tables = queryList("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('allocation_legs', 'allocation_legs_old')") { it.getString(1) }
-        if ("allocation_legs_old" !in tables || "allocation_legs" !in tables) return@transaction
-        val oldCols = queryList("PRAGMA table_info(allocation_legs_old)") { it.getString(2) }.toSet()
-        val newCols = queryList("PRAGMA table_info(allocation_legs)") { it.getString(2) }.toSet()
-        val shared = oldCols.intersect(newCols)
-        val required = setOf("core_id", "allocation_seq", "headcode", "service_date", "resource_group_id", "vehicles", "origin_stanox", "dest_stanox", "updated_at")
-        val missing = required - shared
-        if (missing.isNotEmpty()) {
-            log.warn("Not restoring allocation_legs: allocation_legs_old lacks $missing. Table left in place.")
-            return@transaction
-        }
-        val columns = shared.joinToString(", ")
-        val rows = queryList("SELECT count(*) FROM allocation_legs_old") { it.getInt(1) }.first()
-        exec("INSERT OR IGNORE INTO allocation_legs ($columns) SELECT $columns FROM allocation_legs_old")
-        exec("DROP TABLE allocation_legs_old")
-        log.info("Restored allocation_legs from allocation_legs_old: $rows row(s)")
-    }
 }
