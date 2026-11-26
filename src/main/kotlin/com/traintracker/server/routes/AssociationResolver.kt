@@ -171,206 +171,162 @@ private fun unitsCompatible(mine: Set<String>, theirs: Set<String>): Boolean {
 fun applyAssociations(svc: ServiceResponse, ctx: AssociationContext, date: String = LocalDate.now().toString()): ServiceResponse =
     ctx.pruneCancelled(applyAssociationsRaw(svc, ctx, date))
 
+/** The train this service divided from (VV). */
+private class SplitFrom(val uid: String, val headcode: String, val date: String)
+
+/** One valid portion this service divides into. */
+private class DividePortion(val assoc: AssociationRecord, val headcode: String, val destName: String?)
+
+/** What a service divides into: every valid portion, the divide point, and the last passenger portion. */
+private class DividesInto(
+    val all: List<SplitCandidate>,
+    val tiploc: String,
+    val tiplocName: String,
+    val toUid: String?,
+    val toHeadcode: String?,
+    val toDestName: String?,
+    val toDate: String?,
+)
+
+/** The mid-journey join (JJ/NP) of a service with another train, and every train it joins. */
+private class JoinsWith(val tiploc: String, val tiplocName: String, val parents: List<CoupledParent>)
+
+/** Picks one of several candidate parents: the only one, else the only one sharing a unit with this service, else the first. */
+private fun pickParent(cands: List<ParentCand>, myUnits: Set<String>, ctx: AssociationContext): ParentCand? {
+    if (cands.size <= 1) return cands.firstOrNull()
+    val sharing = cands.filter { p -> (ctx.assocUnits[p.uid] ?: emptySet()).any { it in myUnits } }
+    return sharing.singleOrNull() ?: cands.first()
+}
+
+/** Trains that divide into (VV) or join (JJ/NP) this one at a stop the parent really calls at. */
+private fun parentCandidates(uid: String, ctx: AssociationContext): List<ParentCand> =
+    ctx.reverseAssocMap[uid].orEmpty()
+        .filter { it.assocType in listOf("VV", "JJ", "NP") }
+        .mapNotNull { assoc ->
+            val parentHeadcode = ctx.assocHeadcodes[assoc.mainUid] ?: ""
+            val callsAtTiploc = ctx.assocAllStops[assoc.mainUid]?.contains(assoc.assocTiploc) ?: false
+            if (parentHeadcode.isNotEmpty() && callsAtTiploc) {
+                val tiplocName = CorpusLookup.nameFromTiploc(assoc.assocTiploc) ?: assoc.assocTiploc
+                ParentCand(assoc.mainUid, parentHeadcode, assoc.assocTiploc, tiplocName, assoc.assocType, assoc.dateIndicator)
+            } else null
+        }
+
+/** The train this one divided from (VV), when its units fit. */
+private fun findSplitFrom(parents: List<ParentCand>, myUnits: Set<String>, ctx: AssociationContext, date: String): SplitFrom? {
+    val pick = pickParent(parents.filter { it.assocType == "VV" }, myUnits, ctx) ?: return null
+    if (!unitsCompatible(myUnits, ctx.assocUnits[pick.uid] ?: emptySet())) return null
+    return SplitFrom(pick.uid, pick.headcode, resolveConnectionDate(date, pick.dateIndicator))
+}
+
+/** The portions this service divides into (VV): not at its terminus, starting at the divide point, with units that fit. */
+private fun findDivides(svc: ServiceResponse, ctx: AssociationContext, date: String): DividesInto? {
+    val uid = svc.uid
+    val myUnits = ctx.assocUnits[uid] ?: emptySet()
+    val portions = ctx.assocMap[uid].orEmpty().filter { it.assocType == "VV" }.mapNotNull { a ->
+        val headcode = ctx.assocHeadcodes[a.assocUid] ?: ""
+        val effectiveLo = ctx.assocEffectiveLos[a.assocUid] ?: ""
+        val valid = ctx.svcTermini[uid] != a.assocTiploc &&
+            (effectiveLo == a.assocTiploc || effectiveLo.isEmpty()) &&
+            unitsCompatible(myUnits, ctx.assocUnits[a.assocUid] ?: emptySet())
+        if (!valid) return@mapNotNull null
+        val destName = (ctx.assocDestTiplocs[a.assocUid] ?: "").takeIf { it.isNotEmpty() }
+            ?.let { CorpusLookup.nameFromTiploc(it) }
+        DividePortion(a, headcode, destName)
+    }
+    val last = portions.lastOrNull() ?: return null
+    val toPassenger = portions.lastOrNull { isPassengerHeadcode(it.headcode) }
+    val toDate = toPassenger?.let { p ->
+        val originTime = ctx.assocOriginTimes[p.assoc.assocUid] ?: ""
+        resolveConnectionDate(date, p.assoc.dateIndicator, originTime.isNotEmpty() && originTime < svc.scheduledTime)
+    }
+    return DividesInto(
+        all = portions.map { SplitCandidate(it.assoc.assocUid, it.headcode, it.destName) },
+        tiploc = last.assoc.assocTiploc,
+        tiplocName = CorpusLookup.nameFromTiploc(last.assoc.assocTiploc) ?: last.assoc.assocTiploc,
+        toUid = toPassenger?.assoc?.assocUid,
+        toHeadcode = toPassenger?.headcode,
+        toDestName = toPassenger?.destName,
+        toDate = toDate,
+    )
+}
+
+/** The trains this service joins or is joined by mid-journey (JJ/NP): not at its terminus, and one end of the other train is the join point. */
+private fun findJoins(uid: String, ctx: AssociationContext): JoinsWith? {
+    val joins = ctx.assocMap[uid].orEmpty().filter { it.assocType == "JJ" || it.assocType == "NP" }.filter { a ->
+        val headcode = ctx.assocHeadcodes[a.assocUid] ?: ""
+        val origin = ctx.assocOriginTiplocs[a.assocUid] ?: ""
+        val dest = ctx.assocDestTiplocs[a.assocUid] ?: ""
+        ctx.svcTermini[uid] != a.assocTiploc && headcode.isNotEmpty() && (origin == a.assocTiploc || dest == a.assocTiploc)
+    }
+    val last = joins.lastOrNull() ?: return null
+    return JoinsWith(
+        tiploc = last.assocTiploc,
+        tiplocName = CorpusLookup.nameFromTiploc(last.assocTiploc) ?: last.assocTiploc,
+        parents = joins.map { CoupledParent(it.assocUid, ctx.assocHeadcodes[it.assocUid] ?: "", it.assocType) },
+    )
+}
+
+private fun AssociationInfo.withForms(forms: FormsCandidate?, formsDate: String?) =
+    copy(formsUid = forms?.uid, formsHeadcode = forms?.headcode, formsDate = formsDate)
+
+private fun AssociationInfo.withSplitFrom(from: SplitFrom?) =
+    copy(splitFromUid = from?.uid, splitFromHeadcode = from?.headcode, splitFromDate = from?.date)
+
 private fun applyAssociationsRaw(svc: ServiceResponse, ctx: AssociationContext, date: String): ServiceResponse {
     val uid = svc.uid
-    var formsUid2: String? = null
-    var formsHeadcode2: String? = null
-    var formsDate2: String? = null
-    val formsCands = mutableListOf<FormsCandidate>()
-    val splitCands = mutableListOf<SplitCandidate>()
-    var earlySplitFromUid: String? = null
-    var earlySplitFromHeadcode: String? = null
-    var earlySplitFromDate: String? = null
-    run {
-        val earlyReverseAssocs = ctx.reverseAssocMap[uid]
-        if (!earlyReverseAssocs.isNullOrEmpty()) {
-            val vvParentCands = earlyReverseAssocs
-                .filter { it.assocType == "VV" }
-                .mapNotNull { assoc ->
-                    val parentHeadcode = ctx.assocHeadcodes[assoc.mainUid] ?: ""
-                    val mainCallsAtAssocTiploc = ctx.assocAllStops[assoc.mainUid]
-                        ?.contains(assoc.assocTiploc) ?: false
-                    if (parentHeadcode.isNotEmpty() && mainCallsAtAssocTiploc) {
-                        ParentCand(assoc.mainUid, parentHeadcode, assoc.assocTiploc, "", "VV", assoc.dateIndicator)
-                    } else null
-                }
-            if (vvParentCands.isNotEmpty()) {
-                val myUnitsEarly = ctx.assocUnits[uid] ?: emptySet()
-                val vvShared = vvParentCands.filter { p -> (ctx.assocUnits[p.uid] ?: emptySet()).any { it in myUnitsEarly } }
-                val vvPick = if (vvParentCands.size == 1) vvParentCands.first() else vvShared.singleOrNull() ?: vvParentCands.first()
-                if (unitsCompatible(myUnitsEarly, ctx.assocUnits[vvPick.uid] ?: emptySet())) {
-                    earlySplitFromUid = vvPick.uid
-                    earlySplitFromHeadcode = vvPick.headcode
-                    earlySplitFromDate = resolveConnectionDate(date, vvPick.dateIndicator)
-                }
-            }
-        }
-    }
+    val myUnits = ctx.assocUnits[uid] ?: emptySet()
+    val assoc = svc.association
+    val parents = parentCandidates(uid, ctx)
+    val splitFrom = findSplitFrom(parents, myUnits, ctx, date)
+    val forms = resolveNextForms(uid, ctx, date)
+    val formsDate = forms?.let { resolveConnectionDate(date, it.dateIndicator) }
 
-    val assocs = ctx.assocMap[uid]
-    if (!assocs.isNullOrEmpty()) {
-        var splitTiploc: String? = null
-        var splitTiplocName: String? = null
-        var splitToHeadcode: String? = null
-        var splitToUid2: String? = null
-        var splitToDestName2: String? = null
-        var splitToDate2: String? = null
-        var couplingTiploc2: String? = null
-        var couplingTiplocName2: String? = null
-        var coupledFromHeadcode2: String? = null
-        val couplingCands = mutableListOf<CoupledParent>()
-        for (assoc in assocs) {
-            val assocHeadcode = ctx.assocHeadcodes[assoc.assocUid] ?: ""
-            val tiplocCrs = CorpusLookup.nameFromTiploc(assoc.assocTiploc) ?: assoc.assocTiploc
-            val assocTiplocIsTerminus = ctx.svcTermini[uid] == assoc.assocTiploc
-            val assocEffectiveLo = ctx.assocEffectiveLos[assoc.assocUid] ?: ""
-            val assocOriginTiploc = ctx.assocOriginTiplocs[assoc.assocUid] ?: ""
-            val assocDestTiploc = ctx.assocDestTiplocs[assoc.assocUid] ?: ""
-            when (assoc.assocType) {
-                "VV" -> {
-                    val isPassengerSplit = isPassengerHeadcode(assocHeadcode)
-                    val isValidSplit = !assocTiplocIsTerminus &&
-                        (assocEffectiveLo == assoc.assocTiploc || assocEffectiveLo.isEmpty()) &&
-                        unitsCompatible(ctx.assocUnits[uid] ?: emptySet(), ctx.assocUnits[assoc.assocUid] ?: emptySet())
-                    if (isValidSplit) {
-                        splitCands.add(
-                            SplitCandidate(
-                                assoc.assocUid,
-                                assocHeadcode,
-                                assocDestTiploc.takeIf { it.isNotEmpty() }?.let { CorpusLookup.nameFromTiploc(it) }
-                            )
-                        )
-                        splitTiploc = assoc.assocTiploc
-                        splitTiplocName = tiplocCrs
-                    }
-                    if (isPassengerSplit && isValidSplit) {
-                        splitToHeadcode = assocHeadcode
-                        splitToUid2 = assoc.assocUid
-                        splitToDestName2 = assocDestTiploc.takeIf { it.isNotEmpty() }
-                            ?.let { CorpusLookup.nameFromTiploc(it) }
-                        val splitOriginTime = ctx.assocOriginTimes[assoc.assocUid] ?: ""
-                        val splitFallbackNextDay = splitOriginTime.isNotEmpty() && splitOriginTime < svc.scheduledTime
-                        splitToDate2 = resolveConnectionDate(date, assoc.dateIndicator, splitFallbackNextDay)
-                    }
-                }
-                "JJ", "NP" -> {
-                    val validJoin = !assocTiplocIsTerminus && assocHeadcode.isNotEmpty() &&
-                        (assocOriginTiploc == assoc.assocTiploc || assocDestTiploc == assoc.assocTiploc)
-                    if (validJoin) {
-                        couplingTiploc2 = assoc.assocTiploc
-                        couplingTiplocName2 = tiplocCrs
-                        coupledFromHeadcode2 = assocHeadcode
-                        couplingCands.add(CoupledParent(assoc.assocUid, assocHeadcode, assoc.assocType))
-                    } else if (assocTiplocIsTerminus && assocHeadcode.isNotEmpty() && assocOriginTiploc == assoc.assocTiploc) {
-                        formsCands.add(FormsCandidate(assoc.assocUid, assocHeadcode, assoc.dateIndicator, assoc.stpInd))
-                    }
-                }
-            }
-        }
-        val myUnits = ctx.assocUnits[uid] ?: emptySet()
-        val fPick = pickFormsCandidate(formsCands, myUnits, ctx)
-        formsUid2 = fPick?.uid
-        formsHeadcode2 = fPick?.headcode
-        formsDate2 = fPick?.let { resolveConnectionDate(date, it.dateIndicator) }
-        val couplingPrimary = couplingCands.firstOrNull { isPassengerHeadcode(it.headcode) } ?: couplingCands.firstOrNull()
-        val matchedCoupling = assocs.firstOrNull { it.assocTiploc == couplingTiploc2 }
-        if (splitTiploc != null) {
-            return svc.copy(
-                association = svc.association.copy(
-                    formsUid = formsUid2,
-                    formsHeadcode = formsHeadcode2,
-                    formsDate = formsDate2,
-                    splitTiploc = splitTiploc,
-                    splitTiplocName = splitTiplocName,
-                    splitToUid = splitToUid2,
-                    splitToHeadcode = splitToHeadcode,
-                    splitToDestName = splitToDestName2,
-                    splitToDate = splitToDate2,
-                    splitToAll = splitCands,
-                    splitFromUid = earlySplitFromUid,
-                    splitFromHeadcode = earlySplitFromHeadcode,
-                    splitFromDate = earlySplitFromDate
-                )
-            )
-        }
-        if (couplingTiploc2 != null) {
-            return svc.copy(
-                association = svc.association.copy(
-                    couplingTiploc = couplingTiploc2,
-                    couplingTiplocName = couplingTiplocName2,
-                    coupledFromUid = couplingPrimary?.uid,
-                    coupledFromHeadcode = couplingPrimary?.headcode,
-                    couplingAssocType = couplingPrimary?.assocType ?: matchedCoupling?.assocType ?: "NP",
-                    coupledFromAll = couplingCands,
-                    splitFromUid = earlySplitFromUid,
-                    splitFromHeadcode = earlySplitFromHeadcode,
-                    splitFromDate = earlySplitFromDate,
-                    formsUid = formsUid2,
-                    formsHeadcode = formsHeadcode2,
-                    formsDate = formsDate2,
-                    splitToAll = splitCands
-                )
-            )
-        }
-    }
-
-    val parentCands = mutableListOf<ParentCand>()
-    val reverseAssocs = ctx.reverseAssocMap[uid]
-    if (!reverseAssocs.isNullOrEmpty() && svc.association.couplingTiploc == null) {
-        for (assoc in reverseAssocs) {
-            if (assoc.assocType in listOf("VV", "JJ", "NP")) {
-                val parentHeadcode = ctx.assocHeadcodes[assoc.mainUid] ?: ""
-                val tiplocCrs = CorpusLookup.nameFromTiploc(assoc.assocTiploc) ?: assoc.assocTiploc
-                val mainCallsAtAssocTiploc = ctx.assocAllStops[assoc.mainUid]
-                    ?.contains(assoc.assocTiploc) ?: false
-                if (parentHeadcode.isNotEmpty() && mainCallsAtAssocTiploc) {
-                    parentCands.add(ParentCand(assoc.mainUid, parentHeadcode, assoc.assocTiploc, tiplocCrs, assoc.assocType, assoc.dateIndicator))
-                }
-            }
-        }
-    }
-    if (parentCands.isNotEmpty()) {
-        val myUnitsRev = ctx.assocUnits[uid] ?: emptySet()
-        val nonVvParentCands = parentCands.filter { it.assocType != "VV" }
-        val shared = nonVvParentCands.filter { p -> (ctx.assocUnits[p.uid] ?: emptySet()).any { it in myUnitsRev } }
-        val primary = if (nonVvParentCands.isEmpty()) null
-        else if (nonVvParentCands.size == 1) nonVvParentCands.first()
-        else shared.singleOrNull() ?: nonVvParentCands.first()
-        val vvCands = parentCands.filter { it.assocType == "VV" }
-        val vvShared = vvCands.filter { p -> (ctx.assocUnits[p.uid] ?: emptySet()).any { it in myUnitsRev } }
-        val vvPrimary = (
-            if (vvCands.isEmpty()) null
-            else if (vvCands.size == 1) vvCands.first()
-            else vvShared.singleOrNull() ?: vvCands.first()
-            )?.takeIf { unitsCompatible(myUnitsRev, ctx.assocUnits[it.uid] ?: emptySet()) }
+    // 1. It divides into portions here.
+    findDivides(svc, ctx, date)?.let { d ->
         return svc.copy(
-            association = svc.association.copy(
+            association = assoc.withForms(forms, formsDate).withSplitFrom(splitFrom).copy(
+                splitTiploc = d.tiploc,
+                splitTiplocName = d.tiplocName,
+                splitToUid = d.toUid,
+                splitToHeadcode = d.toHeadcode,
+                splitToDestName = d.toDestName,
+                splitToDate = d.toDate,
+                splitToAll = d.all,
+            )
+        )
+    }
+    // 2. It joins another train mid-journey.
+    findJoins(uid, ctx)?.let { j ->
+        val primary = j.parents.firstOrNull { isPassengerHeadcode(it.headcode) } ?: j.parents.first()
+        return svc.copy(
+            association = assoc.withForms(forms, formsDate).withSplitFrom(splitFrom).copy(
+                couplingTiploc = j.tiploc,
+                couplingTiplocName = j.tiplocName,
+                coupledFromUid = primary.uid,
+                coupledFromHeadcode = primary.headcode,
+                couplingAssocType = primary.assocType,
+                coupledFromAll = j.parents,
+                splitToAll = emptyList(),
+            )
+        )
+    }
+    // 3. It was divided from, or joined by, a parent train.
+    if (assoc.couplingTiploc == null && parents.isNotEmpty()) {
+        val primary = pickParent(parents.filter { it.assocType != "VV" }, myUnits, ctx)
+        return svc.copy(
+            association = assoc.withForms(forms, formsDate).withSplitFrom(splitFrom).copy(
                 couplingTiploc = primary?.tiploc,
                 couplingTiplocName = primary?.tiplocName,
                 coupledFromUid = primary?.uid,
                 coupledFromHeadcode = primary?.headcode,
                 couplingAssocType = primary?.assocType,
-                coupledFromAll = parentCands.map { CoupledParent(it.uid, it.headcode, it.assocType) },
-                splitFromUid = vvPrimary?.uid,
-                splitFromHeadcode = vvPrimary?.headcode,
-                splitFromDate = vvPrimary?.let { resolveConnectionDate(date, it.dateIndicator) },
-                formsUid = formsUid2,
-                formsHeadcode = formsHeadcode2,
-                formsDate = formsDate2,
-                splitToAll = splitCands
+                coupledFromAll = parents.map { CoupledParent(it.uid, it.headcode, it.assocType) },
+                splitToAll = emptyList(),
             )
         )
     }
-    return if (formsUid2 != null || splitCands.isNotEmpty()) {
-        svc.copy(
-            association = svc.association.copy(
-                formsUid = formsUid2,
-                formsHeadcode = formsHeadcode2,
-                formsDate = formsDate2,
-                splitToAll = splitCands
-            )
-        )
-    } else svc
+    // 4. Only what it forms at its terminus.
+    return if (forms != null) svc.copy(association = assoc.withForms(forms, formsDate).copy(splitToAll = emptyList())) else svc
 }
 
 data class ChainHop(val uid: String, val headcode: String, val date: String)
